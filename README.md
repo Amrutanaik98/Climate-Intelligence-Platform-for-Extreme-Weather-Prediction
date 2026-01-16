@@ -1,1 +1,1 @@
-## Climate Intelligence Platform for Extreme Weather Prediction
+Climate Intelligence Platform for Extreme Weather Prediction
