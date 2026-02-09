@@ -1,6 +1,12 @@
 ﻿services:
+  # ============================================
+  # ZOOKEEPER - Manages Kafka cluster
+  # Think of it as the "manager" that keeps track
+  # of which Kafka brokers are alive and healthy
+  # ============================================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
     ports:
@@ -8,13 +14,19 @@
     networks:
       - climate-network
     healthcheck:
-      test: ["CMD", "echo", "ruok", "|", "nc", "localhost", "2181"]
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  # ============================================
+  # KAFKA BROKER - The message queue
+  # This is where all weather data flows through.
+  # Producers send data here, consumers read from here.
+  # ============================================
   kafka:
     image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
     depends_on:
       zookeeper:
         condition: service_healthy
@@ -27,18 +39,95 @@
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Schema Registry needs these
+      KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
     ports:
       - "9092:9092"
     networks:
       - climate-network
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions.sh", "--bootstrap-server", "localhost:9092"]
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # ============================================
+  # SCHEMA REGISTRY - Data Contract Enforcer
+  # 
+  # WHY DO WE NEED THIS?
+  # Without it, anyone can send ANY data to Kafka:
+  #   {"temp": "hot"}  ← This would break your ML model!
+  #
+  # Schema Registry enforces rules:
+  #   "temperature MUST be a number, location MUST be a string"
+  # If a producer sends bad data → REJECTED before entering Kafka.
+  #
+  # It also handles SCHEMA EVOLUTION:
+  #   If you want to add a new field later (e.g., uv_index),
+  #   Schema Registry checks it's backward compatible so
+  #   existing consumers don't break.
+  #
+  # PORT 8081 = where Schema Registry listens
+  # ============================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    ports:
+      - "8081:8081"
+    networks:
+      - climate-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
 
+  # ============================================
+  # KAFKA UI - Web Interface to See Your Data
+  #
+  # WHY DO WE NEED THIS?
+  # Without it, you're blind — you can't see what's
+  # inside Kafka without running command-line tools.
+  #
+  # Kafka UI gives you a web dashboard where you can:
+  #   - See all topics and how many messages they have
+  #   - Read actual messages (see the weather data!)
+  #   - Monitor consumer groups (who's reading what)
+  #   - Check broker health
+  #
+  # PORT 8080 = open http://localhost:8080 in browser
+  # ============================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: climate-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+    ports:
+      - "8080:8080"
+    networks:
+      - climate-network
+
+  # ============================================
+  # POSTGRES - Database for Airflow metadata
+
+  # ============================================
   postgres:
     image: postgres:15
+    container_name: postgres
     environment:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
@@ -55,8 +144,13 @@
       timeout: 5s
       retries: 5
 
+  # ============================================
+  # REDIS - Message broker for Airflow
+
+  # ============================================
   redis:
     image: redis:7-alpine
+    container_name: redis
     ports:
       - "6379:6379"
     networks:
