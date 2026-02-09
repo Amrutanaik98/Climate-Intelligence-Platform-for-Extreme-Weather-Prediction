@@ -1,0 +1,6 @@
+confluent-kafka==2.3.0
+avro-python3==1.10.2
+requests==2.31.0
+python-dotenv==1.0.1
+schedule==1.2.1
+uuid6==2024.1.12
