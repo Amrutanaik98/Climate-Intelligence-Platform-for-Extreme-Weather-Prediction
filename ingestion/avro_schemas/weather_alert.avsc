@@ -1,0 +1,80 @@
+{
+  "type": "record",
+  "name": "WeatherAlert",
+  "namespace": "com.climate.platform",
+  "doc": "Schema for severe weather alerts and warnings",
+  "fields": [
+    {
+      "name": "alert_id",
+      "type": "string",
+      "doc": "Unique identifier for this alert"
+    },
+    {
+      "name": "timestamp",
+      "type": "string",
+      "doc": "When the alert was issued"
+    },
+    {
+      "name": "source",
+      "type": "string",
+      "doc": "Issuing authority (e.g., NWS, NOAA)"
+    },
+    {
+      "name": "alert_type",
+      "type": {
+        "type": "enum",
+        "name": "AlertType",
+        "symbols": [
+          "TORNADO_WARNING",
+          "HURRICANE_WARNING",
+          "FLOOD_WARNING",
+          "HEATWAVE_ADVISORY",
+          "WINTER_STORM_WARNING",
+          "THUNDERSTORM_WARNING",
+          "WIND_ADVISORY",
+          "OTHER"
+        ]
+      }
+    },
+    {
+      "name": "severity",
+      "type": {
+        "type": "enum",
+        "name": "Severity",
+        "symbols": ["MINOR", "MODERATE", "SEVERE", "EXTREME"]
+      }
+    },
+    {
+      "name": "headline",
+      "type": "string",
+      "doc": "Short description of the alert"
+    },
+    {
+      "name": "description",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Detailed description"
+    },
+    {
+      "name": "affected_area",
+      "type": {
+        "type": "record",
+        "name": "AffectedArea",
+        "fields": [
+          {"name": "state", "type": "string"},
+          {"name": "counties", "type": {"type": "array", "items": "string"}},
+          {"name": "latitude", "type": "double"},
+          {"name": "longitude", "type": "double"}
+        ]
+      }
+    },
+    {
+      "name": "effective_time",
+      "type": "string"
+    },
+    {
+      "name": "expiry_time",
+      "type": "string"
+    }
+  ]
+}

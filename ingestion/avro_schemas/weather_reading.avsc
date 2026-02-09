@@ -1,0 +1,113 @@
+{
+  "type": "record",
+  "name": "WeatherReading",
+  "namespace": "com.climate.platform",
+  "doc": "Schema for real-time weather observation data from multiple sources",
+  "fields": [
+    {
+      "name": "message_id",
+      "type": "string",
+      "doc": "Unique identifier for this message (UUID)"
+    },
+    {
+      "name": "timestamp",
+      "type": "string",
+      "doc": "ISO 8601 timestamp when the reading was taken"
+    },
+    {
+      "name": "ingestion_timestamp",
+      "type": "string",
+      "doc": "ISO 8601 timestamp when the message entered Kafka"
+    },
+    {
+      "name": "source",
+      "type": {
+        "type": "enum",
+        "name": "DataSource",
+        "symbols": ["NOAA", "OPENWEATHERMAP", "NASA", "MOCK"]
+      },
+      "doc": "Which API this data came from"
+    },
+    {
+      "name": "location",
+      "type": {
+        "type": "record",
+        "name": "Location",
+        "fields": [
+          {"name": "city", "type": "string"},
+          {"name": "state", "type": ["null", "string"], "default": null},
+          {"name": "country", "type": "string", "default": "US"},
+          {"name": "latitude", "type": "double"},
+          {"name": "longitude", "type": "double"}
+        ]
+      },
+      "doc": "Geographic location of the weather station"
+    },
+    {
+      "name": "temperature_fahrenheit",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Temperature in Fahrenheit"
+    },
+    {
+      "name": "temperature_celsius",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Temperature in Celsius"
+    },
+    {
+      "name": "humidity_percent",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Relative humidity as percentage (0-100)"
+    },
+    {
+      "name": "pressure_hpa",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Atmospheric pressure in hectopascals"
+    },
+    {
+      "name": "wind_speed_mph",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Wind speed in miles per hour"
+    },
+    {
+      "name": "wind_direction_degrees",
+      "type": ["null", "int"],
+      "default": null,
+      "doc": "Wind direction in degrees (0-360)"
+    },
+    {
+      "name": "precipitation_mm",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Precipitation in millimeters (last hour)"
+    },
+    {
+      "name": "visibility_km",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Visibility in kilometers"
+    },
+    {
+      "name": "cloud_cover_percent",
+      "type": ["null", "int"],
+      "default": null,
+      "doc": "Cloud cover as percentage (0-100)"
+    },
+    {
+      "name": "weather_condition",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "Text description like 'Clear', 'Rain', 'Thunderstorm'"
+    },
+    {
+      "name": "uv_index",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "UV index (0-11+)"
+    }
+  ]
+}

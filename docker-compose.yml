@@ -1,28 +1,28 @@
 ﻿services:
   # ============================================
   # ZOOKEEPER - Manages Kafka cluster
-  # Think of it as the "manager" that keeps track
-  # of which Kafka brokers are alive and healthy
   # ============================================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+      # Enable the "ruok" command so healthcheck can use it
+      KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
     ports:
       - "2181:2181"
     networks:
       - climate-network
     healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      # Use curl to hit Zookeeper's admin server instead of nc
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/commands/ruok || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 15s
 
   # ============================================
   # KAFKA BROKER - The message queue
-  # This is where all weather data flows through.
-  # Producers send data here, consumers read from here.
   # ============================================
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -39,7 +39,6 @@
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      # Schema Registry needs these
       KAFKA_CONFLUENT_SCHEMA_REGISTRY_URL: http://schema-registry:8081
     ports:
       - "9092:9092"
@@ -50,24 +49,16 @@
       interval: 10s
       timeout: 10s
       retries: 10
+      start_period: 30s
 
   # ============================================
   # SCHEMA REGISTRY - Data Contract Enforcer
-  # 
-  # WHY DO WE NEED THIS?
-  # Without it, anyone can send ANY data to Kafka:
-  #   {"temp": "hot"}  ← This would break your ML model!
   #
-  # Schema Registry enforces rules:
-  #   "temperature MUST be a number, location MUST be a string"
-  # If a producer sends bad data → REJECTED before entering Kafka.
+  # WHY: Ensures every message sent to Kafka matches
+  # the Avro schema. Rejects bad data before it enters
+  # the pipeline. Also handles schema evolution.
   #
-  # It also handles SCHEMA EVOLUTION:
-  #   If you want to add a new field later (e.g., uv_index),
-  #   Schema Registry checks it's backward compatible so
-  #   existing consumers don't break.
-  #
-  # PORT 8081 = where Schema Registry listens
+  # http://localhost:8081 = Schema Registry API
   # ============================================
   schema-registry:
     image: confluentinc/cp-schema-registry:7.5.0
@@ -88,21 +79,15 @@
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
   # ============================================
-  # KAFKA UI - Web Interface to See Your Data
+  # KAFKA UI - Web dashboard to see your data
   #
-  # WHY DO WE NEED THIS?
-  # Without it, you're blind — you can't see what's
-  # inside Kafka without running command-line tools.
+  # WHY: Visual interface to see topics, messages,
+  # consumer groups, and schemas without command line.
   #
-  # Kafka UI gives you a web dashboard where you can:
-  #   - See all topics and how many messages they have
-  #   - Read actual messages (see the weather data!)
-  #   - Monitor consumer groups (who's reading what)
-  #   - Check broker health
-  #
-  # PORT 8080 = open http://localhost:8080 in browser
+  # http://localhost:8080 = Kafka UI dashboard
   # ============================================
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -117,13 +102,12 @@
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
     ports:
-      - "8080:8080"
+      - "8888:8080"
     networks:
       - climate-network
 
   # ============================================
-  # POSTGRES - Database for Airflow metadata
-
+  # POSTGRES - Database for Airflow (Week 4)
   # ============================================
   postgres:
     image: postgres:15
@@ -145,8 +129,7 @@
       retries: 5
 
   # ============================================
-  # REDIS - Message broker for Airflow
-
+  # REDIS - Message broker for Airflow (Week 4)
   # ============================================
   redis:
     image: redis:7-alpine
