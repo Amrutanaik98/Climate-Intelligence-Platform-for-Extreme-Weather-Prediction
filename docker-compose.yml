@@ -150,3 +150,26 @@ volumes:
 networks:
   climate-network:
     driver: bridge
+
+
+# ===========================================
+  # WEATHER DATA PRODUCER
+  # ===========================================
+  weather-producer:
+    build:
+      context: ./ingestion
+      dockerfile: Dockerfile
+    container_name: weather-producer
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+      FETCH_INTERVAL_SECONDS: 30
+    networks:
+      - climate-network
+    restart: unless-stopped
