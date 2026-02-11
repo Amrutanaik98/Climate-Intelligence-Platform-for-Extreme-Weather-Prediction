@@ -1,20 +1,18 @@
 ﻿services:
   # ============================================
-  # ZOOKEEPER - Manages Kafka cluster
+  # ZOOKEEPER
   # ============================================
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
-      # Enable the "ruok" command so healthcheck can use it
       KAFKA_OPTS: "-Dzookeeper.4lw.commands.whitelist=ruok,srvr,stat"
     ports:
       - "2181:2181"
     networks:
       - climate-network
     healthcheck:
-      # Use curl to hit Zookeeper's admin server instead of nc
       test: ["CMD-SHELL", "curl -f http://localhost:8080/commands/ruok || exit 1"]
       interval: 10s
       timeout: 5s
@@ -22,7 +20,7 @@
       start_period: 15s
 
   # ============================================
-  # KAFKA BROKER - The message queue
+  # KAFKA BROKER
   # ============================================
   kafka:
     image: confluentinc/cp-kafka:7.5.0
@@ -52,13 +50,7 @@
       start_period: 30s
 
   # ============================================
-  # SCHEMA REGISTRY - Data Contract Enforcer
-  #
-  # WHY: Ensures every message sent to Kafka matches
-  # the Avro schema. Rejects bad data before it enters
-  # the pipeline. Also handles schema evolution.
-  #
-  # http://localhost:8081 = Schema Registry API
+  # SCHEMA REGISTRY
   # ============================================
   schema-registry:
     image: confluentinc/cp-schema-registry:7.5.0
@@ -82,12 +74,7 @@
       start_period: 30s
 
   # ============================================
-  # KAFKA UI - Web dashboard to see your data
-  #
-  # WHY: Visual interface to see topics, messages,
-  # consumer groups, and schemas without command line.
-  #
-  # http://localhost:8080 = Kafka UI dashboard
+  # KAFKA UI - http://localhost:8888
   # ============================================
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -107,7 +94,61 @@
       - climate-network
 
   # ============================================
-  # POSTGRES - Database for Airflow (Week 4)
+  # WEATHER DATA PRODUCER
+  # ============================================
+  weather-producer:
+    build:
+      context: ./ingestion
+      dockerfile: Dockerfile
+    container_name: weather-producer
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+      FETCH_INTERVAL_SECONDS: 30
+    networks:
+      - climate-network
+    restart: unless-stopped
+
+  # ============================================
+  # SPARK MASTER - http://localhost:8090
+  # ============================================
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+    ports:
+      - "8090:8080"
+      - "7077:7077"
+    networks:
+      - climate-network
+
+  # ============================================
+  # SPARK WORKER
+  # ============================================
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=2
+    networks:
+      - climate-network
+
+  # ============================================
+  # POSTGRES - For Airflow (Week 4)
   # ============================================
   postgres:
     image: postgres:15
@@ -129,7 +170,7 @@
       retries: 5
 
   # ============================================
-  # REDIS - Message broker for Airflow (Week 4)
+  # REDIS - For Airflow (Week 4)
   # ============================================
   redis:
     image: redis:7-alpine
@@ -150,72 +191,3 @@ volumes:
 networks:
   climate-network:
     driver: bridge
-
-
-# ===========================================
-  # WEATHER DATA PRODUCER
-  # ===========================================
-  weather-producer:
-    build:
-      context: ./ingestion
-      dockerfile: Dockerfile
-    container_name: weather-producer
-    depends_on:
-      kafka-1:
-        condition: service_healthy
-      schema-registry:
-        condition: service_healthy
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092
-      SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
-      FETCH_INTERVAL_SECONDS: 30
-    networks:
-      - climate-network
-    restart: unless-stopped
-
-
-# ============================================
-  # SPARK MASTER - The brain that coordinates work
-  #
-  # WHY: Spark Master receives jobs and distributes
-  # them to Spark Workers. Think of it as the manager
-  # who assigns tasks to employees.
-  #
-  # http://localhost:8090 = Spark Master Web UI
-  # ============================================
-  spark-master:
-    image: bitnami/spark:3.5
-    container_name: spark-master
-    environment:
-      - SPARK_MODE=master
-      - SPARK_MASTER_HOST=spark-master
-      - SPARK_MASTER_PORT=7077
-    ports:
-      - "8090:8080"    # Spark Master Web UI
-      - "7077:7077"    # Spark Master port (workers connect here)
-    networks:
-      - climate-network
-
-  # ============================================
-  # SPARK WORKER - The muscles that do the work
-  #
-  # WHY: Workers actually process the data. In production
-  # you'd have 10-100 workers across many machines.
-  # For development, 1 worker is fine.
-  #
-  # SPARK_WORKER_MEMORY=2g means this worker can use 2GB RAM
-  # SPARK_WORKER_CORES=2 means this worker uses 2 CPU cores
-  # ============================================
-  spark-worker:
-    image: bitnami/spark:3.5
-    container_name: spark-worker
-    depends_on:
-      - spark-master
-    environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark:https://spark-master:7077
-      - SPARK_WORKER_MEMORY=2g
-      - SPARK_WORKER_CORES=2
-    networks:
-      - climate-network
