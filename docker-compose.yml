@@ -94,32 +94,10 @@
       - climate-network
 
   # ============================================
-  # WEATHER DATA PRODUCER
-  # ============================================
-  weather-producer:
-    build:
-      context: ./ingestion
-      dockerfile: Dockerfile
-    container_name: weather-producer
-    depends_on:
-      kafka:
-        condition: service_healthy
-      schema-registry:
-        condition: service_healthy
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
-      FETCH_INTERVAL_SECONDS: 30
-    networks:
-      - climate-network
-    restart: unless-stopped
-
-  # ============================================
   # SPARK MASTER - http://localhost:8090
   # ============================================
   spark-master:
-    image: bitnami/spark:3.5
+    image: docker.io/bitnamilegacy/spark:3.5.1
     container_name: spark-master
     environment:
       - SPARK_MODE=master
@@ -135,7 +113,7 @@
   # SPARK WORKER
   # ============================================
   spark-worker:
-    image: bitnami/spark:3.5
+    image: docker.io/bitnamilegacy/spark:3.5.1
     container_name: spark-worker
     depends_on:
       - spark-master
@@ -148,7 +126,7 @@
       - climate-network
 
   # ============================================
-  # POSTGRES - For Airflow (Week 4)
+  # POSTGRES - For Airflow 
   # ============================================
   postgres:
     image: postgres:15
@@ -170,7 +148,7 @@
       retries: 5
 
   # ============================================
-  # REDIS - For Airflow (Week 4)
+  # REDIS - For Airflow 
   # ============================================
   redis:
     image: redis:7-alpine
