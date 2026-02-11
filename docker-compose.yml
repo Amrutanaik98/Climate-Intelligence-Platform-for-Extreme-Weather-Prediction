@@ -173,3 +173,49 @@ networks:
     networks:
       - climate-network
     restart: unless-stopped
+
+
+# ============================================
+  # SPARK MASTER - The brain that coordinates work
+  #
+  # WHY: Spark Master receives jobs and distributes
+  # them to Spark Workers. Think of it as the manager
+  # who assigns tasks to employees.
+  #
+  # http://localhost:8090 = Spark Master Web UI
+  # ============================================
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+    ports:
+      - "8090:8080"    # Spark Master Web UI
+      - "7077:7077"    # Spark Master port (workers connect here)
+    networks:
+      - climate-network
+
+  # ============================================
+  # SPARK WORKER - The muscles that do the work
+  #
+  # WHY: Workers actually process the data. In production
+  # you'd have 10-100 workers across many machines.
+  # For development, 1 worker is fine.
+  #
+  # SPARK_WORKER_MEMORY=2g means this worker can use 2GB RAM
+  # SPARK_WORKER_CORES=2 means this worker uses 2 CPU cores
+  # ============================================
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: spark-worker
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark:https://spark-master:7077
+      - SPARK_WORKER_MEMORY=2g
+      - SPARK_WORKER_CORES=2
+    networks:
+      - climate-network
