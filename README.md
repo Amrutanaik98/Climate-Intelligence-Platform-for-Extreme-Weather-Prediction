@@ -636,16 +636,4 @@ curl -X POST http://localhost:8000/api/v1/predict \
 
 ---
 
-## 📄 License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome. Please read [CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines.
-
----
-
-*Built with ❤️ for climate resilience*
