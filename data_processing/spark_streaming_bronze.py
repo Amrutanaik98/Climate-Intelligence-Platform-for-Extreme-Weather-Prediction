@@ -77,7 +77,7 @@ def create_spark_session():
         .master("local[*]")  # Use all available CPU cores
         .config(
             "spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1"
         )
         .config("spark.sql.streaming.checkpointLocation", "data/checkpoints/bronze")
         .config("spark.sql.parquet.compression.codec", "snappy")
