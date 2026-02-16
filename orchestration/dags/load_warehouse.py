@@ -10,7 +10,8 @@ connection string and use google-cloud-bigquery library.
 
 import os
 import logging
-
+import psycopg2
+import psycopg2.extras
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
