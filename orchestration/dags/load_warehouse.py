@@ -109,7 +109,7 @@ def get_weather_type_key(conn, condition):
         "SELECT weather_type_key FROM climate_warehouse.dim_weather_type WHERE condition = %s",
         (condition,)
     )
-    resultset = cursor.fetchone()
+    result = cursor.fetchone()
     if result:
         return result[0]
 
