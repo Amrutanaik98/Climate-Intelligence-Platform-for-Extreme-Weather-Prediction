@@ -529,8 +529,8 @@ SHAP values generated for every prediction, showing which features contributed m
 | **3** | Spark Processing | ✅ Done | Structured Streaming, Medallion Architecture (Bronze/Silver/Gold) |
 | **4** | Warehouse & Airflow | ✅ Done | PostgreSQL star schema, Airflow DAGs, warehouse loader |
 | **5** | ML Models & MLflow | ✅ Done | XGBoost, LSTM, Optuna, SHAP, MLflow tracking |
-| **6** | Gen AI Integration | ✅ Done | Report generator, anomaly explainer, RAG chatbot, text-to-SQL |
-| **7** | API & Dashboard | 🔲 Next | FastAPI endpoints, Streamlit dashboard |
+| **6** | Gen AI Integration | 🔲 Next | Report generator, anomaly explainer, RAG chatbot, text-to-SQL |
+| **7** | API & Dashboard | 🔲 Planned | FastAPI endpoints, Streamlit dashboard |
 | **8** | GCP Deployment & CI/CD | 🔲 Planned | GCS, BigQuery, GKE, Terraform, GitHub Actions, Grafana |
 
 ---
