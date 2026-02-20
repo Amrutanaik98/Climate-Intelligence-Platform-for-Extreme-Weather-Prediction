@@ -162,7 +162,11 @@ This platform combines **real-time data engineering**, **machine learning**, and
 | **Backend API** | FastAPI | REST API for predictions and chatbot |
 | **Frontend** | Streamlit | Interactive dashboard |
 | **Containerization** | Docker, Docker Compose | 8+ services orchestrated locally |
-| **Languages** | Python 3.11, SQL, YAML | Core development |
+| **Cloud Platform** | GCP (GCS, BigQuery, GKE, Vertex AI, Cloud Run) | Production deployment |
+| **Infrastructure as Code** | Terraform | Automated GCP resource provisioning |
+| **CI/CD** | GitHub Actions | Automated testing, building, deployment |
+| **Monitoring** | Prometheus, Grafana | Infrastructure metrics & alerting |
+| **Languages** | Python 3.11, SQL, YAML, HCL | Core development |
 
 ---
 
@@ -196,6 +200,16 @@ This platform combines **real-time data engineering**, **machine learning**, and
 - **Spark Master + Worker** for distributed processing
 - **Airflow (Webserver + Scheduler + Worker)** for orchestration
 - **PostgreSQL + Redis** for metadata and task queuing
+
+### Google Cloud Platform (Production Deployment)
+- **Google Cloud Storage (GCS)** — Cloud data lake replacing local Parquet (Bronze/Silver/Gold buckets)
+- **Google BigQuery** — Cloud data warehouse replacing local PostgreSQL
+- **Google Kubernetes Engine (GKE)** — Container orchestration for all 12+ services
+- **Vertex AI** — ML model serving with auto-scaling endpoints
+- **Cloud Run** — Serverless FastAPI + Streamlit deployment
+- **Artifact Registry** — Docker image storage
+- **Terraform** — Infrastructure as Code for all GCP resources
+- **GitHub Actions** — CI/CD pipeline (lint → test → build → deploy)
 
 ---
 
@@ -517,7 +531,62 @@ SHAP values generated for every prediction, showing which features contributed m
 | **5** | ML Models & MLflow | ✅ Done | XGBoost, LSTM, Optuna, SHAP, MLflow tracking |
 | **6** | Gen AI Integration | ✅ Done | Report generator, anomaly explainer, RAG chatbot, text-to-SQL |
 | **7** | API & Dashboard | 🔲 Next | FastAPI endpoints, Streamlit dashboard |
-| **8** | Deployment & CI/CD | 🔲 Planned | Dockerize all, Terraform, GKE, GitHub Actions |
+| **8** | GCP Deployment & CI/CD | 🔲 Planned | GCS, BigQuery, GKE, Terraform, GitHub Actions, Grafana |
+
+---
+
+## ☁️ GCP Production Architecture (Week 8)
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    GOOGLE CLOUD PLATFORM                                  │
+│                                                                           │
+│   Data Lake: Google Cloud Storage (GCS)                                  │
+│     ├── gs://climate-bronze/  → Raw Parquet from Kafka Connect           │
+│     ├── gs://climate-silver/  → Cleaned & validated                      │
+│     └── gs://climate-gold/    → Feature-engineered, ML-ready             │
+│                                                                           │
+│   Data Warehouse: Google BigQuery                                        │
+│     ├── climate_warehouse.fact_weather_readings                          │
+│     ├── climate_warehouse.dim_location                                   │
+│     ├── climate_warehouse.dim_time                                       │
+│     └── climate_warehouse.dim_weather_type                               │
+│                                                                           │
+│   ML Serving: Vertex AI Endpoints (auto-scaling)                         │
+│     ├── XGBoost model endpoint                                           │
+│     └── LSTM model endpoint                                              │
+│                                                                           │
+│   Container Orchestration: Google Kubernetes Engine (GKE)                 │
+│     ├── Kafka + Zookeeper + Schema Registry pods                         │
+│     ├── Spark Master + Worker pods                                       │
+│     ├── Airflow pods                                                     │
+│     ├── FastAPI + Streamlit pods                                         │
+│     └── Monitoring (Prometheus + Grafana) pods                           │
+│                                                                           │
+│   CI/CD: GitHub Actions → Artifact Registry → GKE                        │
+│   IaC: Terraform (main.tf, variables.tf, outputs.tf)                    │
+│   Monitoring: Prometheus + Grafana dashboards                            │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### GCP Deployment Commands (Week 8)
+
+```bash
+# 1. Set up GCP infrastructure with Terraform
+cd infrastructure/terraform
+terraform init
+terraform plan
+terraform apply
+
+# 2. Build & push Docker images to Artifact Registry
+bash scripts/build_and_push.sh
+
+# 3. Deploy to GKE
+kubectl apply -f infrastructure/kubernetes/
+
+# 4. Verify deployment
+kubectl get pods -n climate-platform
+```
 
 ---
 
@@ -531,6 +600,7 @@ SHAP values generated for every prediction, showing which features contributed m
 - **Gen AI powered**: Natural language reports, anomaly explanations, chatbot, text-to-SQL
 - **Orchestrated**: Airflow DAGs automate the entire pipeline
 - **49 ML features**: Heat index, wind chill, anomaly scores, time features, city statistics
+- **Cloud-ready**: Designed for GCP deployment (GCS, BigQuery, GKE, Vertex AI, Terraform)
 
 ---
 
@@ -550,12 +620,20 @@ GROQ_API_KEY=your_groq_key_here
 # MLflow
 MLFLOW_TRACKING_URI=file:./mlruns
 
-# PostgreSQL
+# PostgreSQL (local warehouse)
 POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_USER=airflow
 POSTGRES_PASSWORD=airflow
 POSTGRES_DB=airflow
+
+# GCP Configuration (for Week 8 deployment)
+GCP_PROJECT_ID=your_gcp_project_id
+GCP_REGION=us-central1
+GCS_BUCKET_BRONZE=climate-bronze
+GCS_BUCKET_SILVER=climate-silver
+GCS_BUCKET_GOLD=climate-gold
+BIGQUERY_DATASET=climate_warehouse
 ```
 
 ---
