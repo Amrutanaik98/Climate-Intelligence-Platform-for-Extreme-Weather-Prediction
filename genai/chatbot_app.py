@@ -1,169 +1,270 @@
 """
-🌍 Climate Intelligence Chatbot - Interactive Streamlit App
-============================================================
-A visually appealing RAG chatbot that lets users ask climate
-questions in natural language and get grounded answers from
-real weather data.
-
-Features:
-- Chat interface with message history
-- RAG (ChromaDB + Groq LLM)
-- Text-to-SQL queries
-- Weather report generation
-- Anomaly explanations
-- Sidebar with data stats
+🌍 Climate Intelligence Command Center
+========================================
+An immersive weather intelligence chatbot with real-time
+data visualization, multi-mode AI, and live city monitoring.
 
 Run: streamlit run genai/chatbot_app.py
 """
 
 import os
-import sys
-import streamlit as st
+import json
+import random
 import chromadb
 import psycopg2
+import pandas as pd
+import streamlit as st
 from datetime import datetime
 from groq import Groq
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ============================================================
-# PAGE CONFIG
-# ============================================================
 st.set_page_config(
-    page_title="🌍 Climate Intelligence Chatbot",
-    page_icon="🌦️",
+    page_title="Climate Command Center",
+    page_icon="🌍",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # ============================================================
-# CUSTOM CSS FOR VISUAL APPEAL
+# CUSTOM CSS — UNIQUE DARK WEATHER THEME
 # ============================================================
 st.markdown("""
 <style>
-    /* Main background */
-    .stApp {
-        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-    }
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@300;400;600;800&display=swap');
 
-    /* Chat message styling */
-    .user-msg {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 15px 20px;
-        border-radius: 20px 20px 5px 20px;
-        margin: 10px 0;
-        color: white;
-        max-width: 80%;
-        margin-left: auto;
-        font-size: 16px;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
-    }
+.stApp {
+    background: #0a0a0f;
+    font-family: 'Inter', sans-serif;
+}
 
-    .bot-msg {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        padding: 15px 20px;
-        border-radius: 20px 20px 20px 5px;
-        margin: 10px 0;
-        color: #e0e0e0;
-        max-width: 85%;
-        font-size: 15px;
-        border: 1px solid rgba(255,255,255,0.1);
-        box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-    }
+/* Top command bar */
+.command-bar {
+    background: linear-gradient(90deg, #0f172a, #1e1b4b, #0f172a);
+    border-bottom: 1px solid #22d3ee33;
+    padding: 16px 30px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: -1rem -1rem 20px -1rem;
+    border-radius: 0 0 16px 16px;
+}
 
-    .sql-box {
-        background: #1e1e3f;
-        padding: 12px 16px;
-        border-radius: 10px;
-        margin: 8px 0;
-        font-family: 'Courier New', monospace;
-        font-size: 13px;
-        color: #7dd3fc;
-        border: 1px solid #334155;
-        overflow-x: auto;
-    }
+.command-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px;
+    color: #22d3ee;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
 
-    /* Sidebar styling */
-    .sidebar-stat {
-        background: linear-gradient(135deg, #667eea22, #764ba222);
-        padding: 15px;
-        border-radius: 12px;
-        margin: 8px 0;
-        border: 1px solid rgba(255,255,255,0.1);
-        text-align: center;
-    }
+.command-status {
+    display: flex;
+    gap: 15px;
+    align-items: center;
+}
 
-    .stat-number {
-        font-size: 28px;
-        font-weight: bold;
-        color: #667eea;
-    }
+.status-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    animation: pulse 2s infinite;
+}
 
-    .stat-label {
-        font-size: 12px;
-        color: #94a3b8;
-        text-transform: uppercase;
-    }
+.status-live { background: #22c55e; box-shadow: 0 0 10px #22c55e; }
+.status-label { color: #64748b; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
 
-    /* Header styling */
-    .main-header {
-        text-align: center;
-        padding: 20px 0 10px 0;
-    }
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
 
-    .main-header h1 {
-        background: linear-gradient(90deg, #667eea, #764ba2, #f093fb);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-size: 2.2em;
-        font-weight: 800;
-    }
+/* City cards grid */
+.city-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 10px;
+    margin: 15px 0;
+}
 
-    /* Quick action buttons */
-    .quick-btn {
-        background: linear-gradient(135deg, #667eea22, #764ba222);
-        border: 1px solid rgba(255,255,255,0.15);
-        border-radius: 12px;
-        padding: 10px 16px;
-        color: #cbd5e1;
-        cursor: pointer;
-        transition: all 0.3s;
-        text-align: center;
-        font-size: 13px;
-    }
+.city-card {
+    background: linear-gradient(145deg, #131325, #1a1a35);
+    border: 1px solid #ffffff0a;
+    border-radius: 12px;
+    padding: 14px;
+    text-align: center;
+    transition: all 0.3s;
+    cursor: default;
+}
 
-    /* Input styling */
-    .stTextInput > div > div > input {
-        background: #1a1a2e !important;
-        color: white !important;
-        border: 1px solid #334155 !important;
-        border-radius: 15px !important;
-        padding: 12px 20px !important;
-    }
+.city-card:hover {
+    border-color: #22d3ee44;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(34, 211, 238, 0.1);
+}
 
-    /* Hide streamlit branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+.city-name { color: #94a3b8; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+.city-temp { color: #f1f5f9; font-size: 26px; font-weight: 800; margin: 4px 0; font-family: 'JetBrains Mono', monospace; }
+.city-detail { color: #475569; font-size: 10px; }
+.city-extreme { border-color: #ef444466; }
+.city-extreme .city-temp { color: #f87171; }
 
-    .mode-badge {
-        display: inline-block;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 11px;
-        font-weight: 600;
-        margin: 2px;
-    }
-    .mode-rag { background: #166534; color: #4ade80; }
-    .mode-sql { background: #1e3a5f; color: #7dd3fc; }
-    .mode-report { background: #713f12; color: #fbbf24; }
-    .mode-anomaly { background: #7f1d1d; color: #fca5a5; }
+/* Chat area */
+.chat-container {
+    background: #0d0d1a;
+    border: 1px solid #ffffff08;
+    border-radius: 16px;
+    padding: 20px;
+    max-height: 500px;
+    overflow-y: auto;
+    margin: 15px 0;
+}
+
+.msg-user {
+    display: flex;
+    justify-content: flex-end;
+    margin: 12px 0;
+}
+
+.msg-user-bubble {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    color: white;
+    padding: 12px 18px;
+    border-radius: 18px 18px 4px 18px;
+    max-width: 70%;
+    font-size: 14px;
+    box-shadow: 0 4px 20px rgba(99, 102, 241, 0.25);
+}
+
+.msg-bot {
+    display: flex;
+    justify-content: flex-start;
+    margin: 12px 0;
+    gap: 10px;
+}
+
+.msg-bot-avatar {
+    width: 36px;
+    height: 36px;
+    background: linear-gradient(135deg, #06b6d4, #0891b2);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+}
+
+.msg-bot-content {
+    background: #12122a;
+    border: 1px solid #ffffff0a;
+    padding: 14px 18px;
+    border-radius: 4px 18px 18px 18px;
+    max-width: 80%;
+    color: #cbd5e1;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.msg-bot-content code {
+    background: #1e1e3f;
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: #7dd3fc;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+}
+
+/* Mode indicator */
+.mode-tag {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 6px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.tag-rag { background: #064e3b; color: #34d399; }
+.tag-sql { background: #1e3a5f; color: #38bdf8; }
+.tag-report { background: #451a03; color: #fb923c; }
+.tag-anomaly { background: #450a0a; color: #f87171; }
+
+/* Metric cards */
+.metric-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin: 15px 0;
+}
+
+.metric-card {
+    background: linear-gradient(145deg, #131325, #1a1a35);
+    border: 1px solid #ffffff08;
+    border-radius: 12px;
+    padding: 18px;
+    text-align: center;
+}
+
+.metric-value {
+    font-size: 32px;
+    font-weight: 800;
+    font-family: 'JetBrains Mono', monospace;
+    background: linear-gradient(90deg, #22d3ee, #6366f1);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.metric-label {
+    color: #475569;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-top: 4px;
+}
+
+/* Section headers */
+.section-header {
+    color: #e2e8f0;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin: 20px 0 10px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #ffffff0a;
+}
+
+/* Input override */
+.stChatInput > div {
+    background: #12122a !important;
+    border: 1px solid #22d3ee33 !important;
+    border-radius: 14px !important;
+}
+
+.stChatInput textarea {
+    color: #e2e8f0 !important;
+    font-family: 'Inter', sans-serif !important;
+}
+
+/* Hide defaults */
+#MainMenu, footer, header {visibility: hidden;}
+.stDeployButton {display: none;}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0a0a0f; }
+::-webkit-scrollbar-thumb { background: #22d3ee33; border-radius: 3px; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# INITIALIZE SERVICES
+# DATA LOADING
 # ============================================================
 
 @st.cache_resource
@@ -171,348 +272,274 @@ def init_groq():
     return Groq(api_key=os.getenv("GROQ_API_KEY"))
 
 @st.cache_resource
-def init_chromadb():
-    client = chromadb.Client()
-    collection = client.get_or_create_collection("weather_data")
-    return client, collection
-
-@st.cache_resource
-def load_weather_into_chromadb():
-    """Load Gold layer data into ChromaDB."""
+def load_all_data():
+    """Load Gold data into both Pandas and ChromaDB."""
     try:
         from pyspark.sql import SparkSession
-        spark = SparkSession.builder.appName("Chatbot").master("local[*]").getOrCreate()
+        spark = SparkSession.builder.appName("CmdCenter").master("local[*]").getOrCreate()
         spark.sparkContext.setLogLevel("ERROR")
         df = spark.read.parquet("data/gold/weather_features").toPandas()
         spark.stop()
 
+        # Load into ChromaDB
         client = chromadb.Client()
         try:
             client.delete_collection("weather_data")
         except Exception:
             pass
-        collection = client.create_collection("weather_data")
+        coll = client.create_collection("weather_data")
 
         docs, metas, ids = [], [], []
-        for i, (_, row) in enumerate(df.iterrows()):
-            doc = (
-                f"City: {row.get('city', '?')}, {row.get('state', '')}. "
-                f"Temperature: {row.get('temperature_fahrenheit', '?')}°F. "
-                f"Humidity: {row.get('humidity_percent', '?')}%. "
-                f"Wind: {row.get('wind_speed_mph', '?')} mph. "
-                f"Pressure: {row.get('pressure_hpa', '?')} hPa. "
-                f"Heat Index: {row.get('heat_index', '?')}°F. "
-                f"Wind Chill: {row.get('wind_chill', '?')}°F. "
-                f"Condition: {row.get('weather_condition', '?')}. "
-                f"Extreme: {'Yes' if row.get('is_extreme_weather', 0) == 1 else 'No'}. "
-                f"Anomaly Score: {row.get('temp_anomaly_score', '?')}."
-            )
-            docs.append(doc)
-            metas.append({"city": str(row.get('city', '')), "state": str(row.get('state', ''))})
+        for i, (_, r) in enumerate(df.iterrows()):
+            d = (f"City: {r.get('city','?')}, {r.get('state','')}. "
+                 f"Temp: {r.get('temperature_fahrenheit','?')}°F. "
+                 f"Humidity: {r.get('humidity_percent','?')}%. "
+                 f"Wind: {r.get('wind_speed_mph','?')} mph. "
+                 f"Pressure: {r.get('pressure_hpa','?')} hPa. "
+                 f"Heat Index: {r.get('heat_index','?')}°F. "
+                 f"Wind Chill: {r.get('wind_chill','?')}°F. "
+                 f"Condition: {r.get('weather_condition','?')}. "
+                 f"Extreme: {'Yes' if r.get('is_extreme_weather',0)==1 else 'No'}. "
+                 f"Anomaly: {r.get('temp_anomaly_score','?')}.")
+            docs.append(d)
+            metas.append({"city": str(r.get('city','')), "state": str(r.get('state',''))})
             ids.append(f"w_{i}")
 
-        batch = 100
-        for s in range(0, len(docs), batch):
-            e = min(s + batch, len(docs))
-            collection.add(documents=docs[s:e], metadatas=metas[s:e], ids=ids[s:e])
+        for s in range(0, len(docs), 100):
+            e = min(s+100, len(docs))
+            coll.add(documents=docs[s:e], metadatas=metas[s:e], ids=ids[s:e])
 
-        return collection, df
+        return df, coll
     except Exception as e:
+        st.error(f"Data load error: {e}")
         return None, None
 
 
+def get_city_latest(df):
+    """Get latest reading for each city."""
+    return df.drop_duplicates(subset=['city'], keep='last').sort_values('temperature_fahrenheit', ascending=False)
+
+
 def get_db_stats():
-    """Get stats from PostgreSQL warehouse."""
     try:
-        conn = psycopg2.connect(
-            host="localhost", port=5432, database="airflow",
-            user="airflow", password="airflow"
-        )
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings")
-        total = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(DISTINCT city) FROM climate_warehouse.dim_location")
-        cities = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE is_extreme_weather = 1")
-        extreme = cur.fetchone()[0]
+        conn = psycopg2.connect(host="localhost", port=5432, database="airflow", user="airflow", password="airflow")
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings")
+        total = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE is_extreme_weather=1")
+        extreme = c.fetchone()[0]
         conn.close()
-        return {"total": total, "cities": cities, "extreme": extreme}
+        return total, extreme
     except Exception:
-        return {"total": 660, "cities": 20, "extreme": 13}
+        return 660, 13
 
 
 # ============================================================
-# CHAT FUNCTIONS
+# AI FUNCTIONS
 # ============================================================
 
-def detect_mode(question):
-    """Detect which mode to use based on the question."""
-    q = question.lower()
-    sql_keywords = ["average", "count", "how many", "total", "sum", "max", "min", "highest", "lowest", "top", "list all", "show me"]
-    report_keywords = ["report", "forecast", "summary", "brief", "conditions in"]
-    anomaly_keywords = ["anomaly", "unusual", "weird", "strange", "abnormal", "why is", "explain"]
-
-    if any(k in q for k in anomaly_keywords):
+def detect_mode(q):
+    q = q.lower()
+    if any(k in q for k in ["anomaly","unusual","strange","why is","explain why"]):
         return "anomaly"
-    if any(k in q for k in report_keywords):
+    if any(k in q for k in ["report","forecast","summary","conditions in","brief"]):
         return "report"
-    if any(k in q for k in sql_keywords):
+    if any(k in q for k in ["average","count","how many","total","max","min","highest","lowest","top","list","show me all"]):
         return "sql"
     return "rag"
 
 
-def rag_answer(question, collection, groq_client):
-    """RAG: Search ChromaDB → LLM generates answer."""
-    results = collection.query(query_texts=[question], n_results=5)
-    context = "\n".join(results['documents'][0]) if results['documents'] else "No data."
-
-    response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": "You are a climate analyst. Answer based ONLY on the provided data. Be specific with numbers."},
-            {"role": "user", "content": f"DATA:\n{context}\n\nQUESTION: {question}\n\nAnswer in under 150 words:"}
-        ],
-        max_tokens=300, temperature=0.2
-    )
-    return response.choices[0].message.content.strip(), "rag"
-
-
-def sql_answer(question, groq_client):
-    """Text-to-SQL: Convert to SQL → Execute → Answer."""
-    schema = """
-    TABLE: climate_warehouse.fact_weather_readings (location_key INT, temperature_fahrenheit FLOAT, humidity_percent FLOAT, pressure_hpa FLOAT, wind_speed_mph FLOAT, heat_index FLOAT, wind_chill FLOAT, temp_anomaly FLOAT, is_extreme_weather INT, source VARCHAR)
-    TABLE: climate_warehouse.dim_location (location_key INT, city VARCHAR, state VARCHAR, region VARCHAR, latitude FLOAT, longitude FLOAT)
-    TABLE: climate_warehouse.dim_weather_type (weather_type_key INT, condition VARCHAR, severity VARCHAR)
-    """
-
-    sql_response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": "Return ONLY a PostgreSQL SELECT query. No explanation. Use climate_warehouse. schema. LIMIT 20."},
-            {"role": "user", "content": f"Schema: {schema}\n\nQuestion: {question}\n\nSQL:"}
-        ],
-        max_tokens=200, temperature=0.1
-    )
-    sql = sql_response.choices[0].message.content.strip().replace("```sql", "").replace("```", "").strip()
-
-    try:
-        conn = psycopg2.connect(host="localhost", port=5432, database="airflow", user="airflow", password="airflow")
-        cur = conn.cursor()
-        cur.execute(sql)
-        cols = [d[0] for d in cur.description]
-        rows = cur.fetchall()
-        conn.close()
-        results = [dict(zip(cols, r)) for r in rows]
-
-        nl_response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Summarize SQL results naturally. Be specific with numbers."},
-                {"role": "user", "content": f"Question: {question}\nResults: {str(results[:10])}\nAnswer in under 100 words:"}
-            ],
-            max_tokens=200, temperature=0.2
-        )
-        answer = nl_response.choices[0].message.content.strip()
-        return f"{answer}\n\n📝 **SQL Query:**\n```sql\n{sql}\n```", "sql"
-
-    except Exception as e:
-        return f"SQL execution failed: {e}\n\nGenerated SQL: `{sql}`", "sql"
-
-
-def report_answer(question, collection, groq_client):
-    """Generate a weather report."""
-    results = collection.query(query_texts=[question], n_results=10)
-    context = "\n".join(results['documents'][0]) if results['documents'] else "No data."
-
-    response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": "You are a professional weather analyst. Generate a structured weather report."},
-            {"role": "user", "content": f"DATA:\n{context}\n\nGenerate a weather report addressing: {question}\n\nFormat: 1) Summary 2) Key findings 3) Risks 4) Recommendations. Under 200 words."}
-        ],
-        max_tokens=400, temperature=0.3
-    )
-    return response.choices[0].message.content.strip(), "report"
-
-
-def anomaly_answer(question, collection, groq_client):
-    """Explain weather anomalies."""
-    results = collection.query(query_texts=[question], n_results=8)
-    context = "\n".join(results['documents'][0]) if results['documents'] else "No data."
-
-    response = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": "You are a meteorologist explaining weather anomalies."},
-            {"role": "user", "content": f"DATA:\n{context}\n\nExplain: {question}\n\nInclude: 1) What's unusual 2) Possible causes 3) Risks 4) Precautions. Under 150 words."}
-        ],
-        max_tokens=300, temperature=0.3
-    )
-    return response.choices[0].message.content.strip(), "anomaly"
-
-
-def get_answer(question, collection, groq_client):
-    """Route question to the right handler."""
+def ai_answer(question, collection, groq_client):
     mode = detect_mode(question)
+
     if mode == "sql":
-        return sql_answer(question, groq_client)
-    elif mode == "report":
-        return report_answer(question, collection, groq_client)
-    elif mode == "anomaly":
-        return anomaly_answer(question, collection, groq_client)
+        schema = "climate_warehouse.fact_weather_readings(location_key,temperature_fahrenheit,humidity_percent,pressure_hpa,wind_speed_mph,heat_index,is_extreme_weather) JOIN climate_warehouse.dim_location(location_key,city,state,region) ON location_key"
+        r = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role":"system","content":"Return ONLY PostgreSQL SELECT. Use climate_warehouse. LIMIT 20. No explanation."},
+                      {"role":"user","content":f"Schema:{schema}\nQuestion:{question}\nSQL:"}],
+            max_tokens=200, temperature=0.1)
+        sql = r.choices[0].message.content.strip().replace("```sql","").replace("```","").strip()
+
+        try:
+            conn = psycopg2.connect(host="localhost",port=5432,database="airflow",user="airflow",password="airflow")
+            cur = conn.cursor()
+            cur.execute(sql)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+            conn.close()
+            results = [dict(zip(cols,r)) for r in rows]
+
+            r2 = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role":"system","content":"Summarize results naturally. Be specific."},
+                          {"role":"user","content":f"Q:{question}\nResults:{str(results[:10])}\nAnswer in under 100 words:"}],
+                max_tokens=200, temperature=0.2)
+            return r2.choices[0].message.content.strip() + f"\n\n`{sql}`", mode
+        except Exception as e:
+            return f"Query error: {e}\n\nGenerated: `{sql}`", mode
+
     else:
-        return rag_answer(question, collection, groq_client)
+        results = collection.query(query_texts=[question], n_results=6)
+        ctx = "\n".join(results['documents'][0]) if results['documents'] else "No data."
+
+        system_prompts = {
+            "rag": "You are a climate data analyst. Answer from provided data only. Be specific with numbers and city names.",
+            "report": "You are a senior weather analyst. Generate structured reports: Summary, Key Findings, Risks, Recommendations.",
+            "anomaly": "You are a meteorologist. Explain anomalies: What's unusual, Possible causes, Risks, Precautions."
+        }
+
+        r = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role":"system","content":system_prompts[mode]},
+                      {"role":"user","content":f"WEATHER DATA:\n{ctx}\n\nQUESTION: {question}\n\nAnswer in under 200 words:"}],
+            max_tokens=400, temperature=0.3)
+        return r.choices[0].message.content.strip(), mode
 
 
 # ============================================================
-# SIDEBAR
+# MAIN UI
 # ============================================================
 
-with st.sidebar:
-    st.markdown("## 🌍 Climate Intelligence")
-    st.markdown("---")
+# Load data
+groq_client = init_groq()
 
-    stats = get_db_stats()
+with st.spinner("Initializing Climate Command Center..."):
+    gold_df, collection = load_all_data()
 
-    st.markdown(f"""
-    <div class="sidebar-stat">
-        <div class="stat-number">{stats['total']}</div>
-        <div class="stat-label">Weather Readings</div>
+if gold_df is None:
+    st.error("❌ Could not load data. Make sure data/gold/ exists.")
+    st.stop()
+
+cities_df = get_city_latest(gold_df)
+total_records, extreme_count = get_db_stats()
+
+# --- COMMAND BAR ---
+st.markdown(f"""
+<div class="command-bar">
+    <div>
+        <span class="command-title">⚡ Climate Command Center</span>
     </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown(f"""
-    <div class="sidebar-stat">
-        <div class="stat-number">{stats['cities']}</div>
-        <div class="stat-label">US Cities Monitored</div>
+    <div class="command-status">
+        <span><span class="status-dot status-live"></span> <span class="status-label">KAFKA LIVE</span></span>
+        <span style="color:#334155">│</span>
+        <span class="status-label">{len(cities_df)} CITIES</span>
+        <span style="color:#334155">│</span>
+        <span class="status-label">{datetime.now().strftime('%H:%M:%S UTC')}</span>
     </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown(f"""
-    <div class="sidebar-stat">
-        <div class="stat-number">{stats['extreme']}</div>
-        <div class="stat-label">Extreme Events Detected</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.markdown("### 🤖 AI Modes")
-    st.markdown("""
-    <span class="mode-badge mode-rag">🔍 RAG Search</span>
-    <span class="mode-badge mode-sql">📊 Text-to-SQL</span>
-    <span class="mode-badge mode-report">📝 Reports</span>
-    <span class="mode-badge mode-anomaly">⚠️ Anomalies</span>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
-    <br>
-    
-    **Try asking:**
-    - "Which city is the hottest?"
-    - "How many extreme weather events?"
-    - "Give me a report for Phoenix"
-    - "Why is the anomaly score high?"
-    """, unsafe_allow_html=True)
-
-    st.markdown("---")
-    st.markdown(f"*Powered by Groq (Llama 3.1) + ChromaDB*")
-    st.markdown(f"*Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
-
-
-# ============================================================
-# MAIN CHAT INTERFACE
-# ============================================================
-
-st.markdown("""
-<div class="main-header">
-    <h1>🌦️ Climate Intelligence Chatbot</h1>
-    <p style="color: #94a3b8; font-size: 16px;">
-        Ask me anything about weather data across 20 US cities — I'll search real data, 
-        query the warehouse, and generate insights using AI.
-    </p>
 </div>
 """, unsafe_allow_html=True)
 
-# Initialize
-groq_client = init_groq()
+# --- METRICS ---
+avg_temp = round(gold_df['temperature_fahrenheit'].mean(), 1)
+max_temp = round(gold_df['temperature_fahrenheit'].max(), 1)
+min_temp = round(gold_df['temperature_fahrenheit'].min(), 1)
 
-with st.spinner("🔄 Loading weather data into AI memory..."):
-    collection, gold_df = load_weather_into_chromadb()
+st.markdown(f"""
+<div class="metric-row">
+    <div class="metric-card">
+        <div class="metric-value">{total_records}</div>
+        <div class="metric-label">Total Readings</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value">{avg_temp}°</div>
+        <div class="metric-label">Avg Temperature</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value">{extreme_count}</div>
+        <div class="metric-label">Extreme Events</div>
+    </div>
+    <div class="metric-card">
+        <div class="metric-value">{max_temp}°</div>
+        <div class="metric-label">Peak Temperature</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
-if collection is None:
-    st.error("❌ Could not load weather data. Make sure Gold layer exists in data/gold/")
-    st.stop()
+# --- CITY MONITORING GRID ---
+st.markdown('<div class="section-header">📡 Live City Monitoring</div>', unsafe_allow_html=True)
 
-# Chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": "👋 Hi! I'm your Climate Intelligence Assistant. I can answer questions about weather data from 20 US cities.\n\nI can:\n- 🔍 **Search** weather data (RAG)\n- 📊 **Query** the warehouse (Text-to-SQL)\n- 📝 **Generate** weather reports\n- ⚠️ **Explain** anomalies\n\nWhat would you like to know?",
+city_cards = ""
+for _, row in cities_df.iterrows():
+    is_ext = "city-extreme" if row.get('is_extreme_weather', 0) == 1 else ""
+    emoji = "🔴" if row.get('is_extreme_weather', 0) == 1 else ""
+    temp = round(row.get('temperature_fahrenheit', 0), 1)
+    hum = round(row.get('humidity_percent', 0))
+    city_cards += f"""
+    <div class="city-card {is_ext}">
+        <div class="city-name">{row.get('city','?')} {emoji}</div>
+        <div class="city-temp">{temp}°</div>
+        <div class="city-detail">💧 {hum}% │ 💨 {round(row.get('wind_speed_mph',0),1)} mph</div>
+    </div>
+    """
+
+st.markdown(f'<div class="city-grid">{city_cards}</div>', unsafe_allow_html=True)
+
+# --- AI CHAT ---
+st.markdown('<div class="section-header">🧠 AI Weather Intelligence</div>', unsafe_allow_html=True)
+
+# Initialize chat
+if "msgs" not in st.session_state:
+    st.session_state.msgs = [{
+        "role": "bot",
+        "content": "Welcome to Climate Command Center. I'm monitoring weather data across 20 US cities in real-time. Ask me anything — I can search data, run SQL queries, generate reports, and explain anomalies.",
         "mode": "rag"
-    })
+    }]
 
-# Quick action buttons
-st.markdown("#### ⚡ Quick Questions")
-col1, col2, col3, col4 = st.columns(4)
+# Quick actions
+c1, c2, c3, c4, c5 = st.columns(5)
+qk = None
+with c1:
+    if st.button("🌡️ Hottest", use_container_width=True):
+        qk = "Which city has the highest temperature right now?"
+with c2:
+    if st.button("🥶 Coldest", use_container_width=True):
+        qk = "Which city has the lowest temperature?"
+with c3:
+    if st.button("⚠️ Extreme", use_container_width=True):
+        qk = "How many extreme weather events are there and which cities?"
+with c4:
+    if st.button("📝 Report", use_container_width=True):
+        qk = "Give me a weather report for all monitored cities"
+with c5:
+    if st.button("🔍 Anomaly", use_container_width=True):
+        qk = "Explain any weather anomalies in the current data"
 
-quick_q = None
-with col1:
-    if st.button("🌡️ Hottest City", use_container_width=True):
-        quick_q = "Which city has the highest temperature?"
-with col2:
-    if st.button("⚠️ Extreme Events", use_container_width=True):
-        quick_q = "How many extreme weather events are there?"
-with col3:
-    if st.button("📝 Phoenix Report", use_container_width=True):
-        quick_q = "Give me a weather report for Phoenix"
-with col4:
-    if st.button("🥶 Coldest City", use_container_width=True):
-        quick_q = "Which city has the lowest temperature?"
+# Render chat messages
+mode_tags = {
+    "rag": '<span class="mode-tag tag-rag">RAG SEARCH</span>',
+    "sql": '<span class="mode-tag tag-sql">SQL QUERY</span>',
+    "report": '<span class="mode-tag tag-report">AI REPORT</span>',
+    "anomaly": '<span class="mode-tag tag-anomaly">ANOMALY</span>',
+}
 
-st.markdown("---")
-
-# Display chat history
-for msg in st.session_state.messages:
+chat_html = ""
+for msg in st.session_state.msgs:
     if msg["role"] == "user":
-        st.markdown(f'<div class="user-msg">💬 {msg["content"]}</div>', unsafe_allow_html=True)
+        chat_html += f'<div class="msg-user"><div class="msg-user-bubble">{msg["content"]}</div></div>'
     else:
-        mode = msg.get("mode", "rag")
-        mode_badges = {
-            "rag": '<span class="mode-badge mode-rag">🔍 RAG Search</span>',
-            "sql": '<span class="mode-badge mode-sql">📊 Text-to-SQL</span>',
-            "report": '<span class="mode-badge mode-report">📝 Report</span>',
-            "anomaly": '<span class="mode-badge mode-anomaly">⚠️ Anomaly</span>',
-        }
-        badge = mode_badges.get(mode, "")
-        st.markdown(f'<div class="bot-msg">{badge}<br><br>{msg["content"]}</div>', unsafe_allow_html=True)
+        tag = mode_tags.get(msg.get("mode", "rag"), "")
+        # Escape HTML in content but preserve newlines
+        content = msg["content"].replace("\n", "<br>")
+        chat_html += f'''
+        <div class="msg-bot">
+            <div class="msg-bot-avatar">🌍</div>
+            <div class="msg-bot-content">{tag}{content}</div>
+        </div>'''
+
+st.markdown(f'<div class="chat-container">{chat_html}</div>', unsafe_allow_html=True)
 
 # Chat input
-user_input = st.chat_input("Ask me about weather, climate, or extreme events...")
+user_input = st.chat_input("Ask about weather, climate data, or extreme events...")
 
-# Handle quick question buttons
-if quick_q:
-    user_input = quick_q
+if qk:
+    user_input = qk
 
 if user_input:
-    # Add user message
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    st.markdown(f'<div class="user-msg">💬 {user_input}</div>', unsafe_allow_html=True)
+    st.session_state.msgs.append({"role": "user", "content": user_input})
 
-    # Get AI answer
-    with st.spinner("🧠 Thinking..."):
-        answer, mode = get_answer(user_input, collection, groq_client)
+    with st.spinner("🧠 Analyzing..."):
+        answer, mode = ai_answer(user_input, collection, groq_client)
 
-    # Add bot response
-    st.session_state.messages.append({"role": "assistant", "content": answer, "mode": mode})
-
-    mode_badges = {
-        "rag": '<span class="mode-badge mode-rag">🔍 RAG Search</span>',
-        "sql": '<span class="mode-badge mode-sql">📊 Text-to-SQL</span>',
-        "report": '<span class="mode-badge mode-report">📝 Report</span>',
-        "anomaly": '<span class="mode-badge mode-anomaly">⚠️ Anomaly</span>',
-    }
-    badge = mode_badges.get(mode, "")
-    st.markdown(f'<div class="bot-msg">{badge}<br><br>{answer}</div>', unsafe_allow_html=True)
-
+    st.session_state.msgs.append({"role": "bot", "content": answer, "mode": mode})
     st.rerun()
