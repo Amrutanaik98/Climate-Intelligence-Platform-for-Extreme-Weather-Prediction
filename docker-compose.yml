@@ -126,7 +126,7 @@
       - climate-network
 
   # ============================================
-  # POSTGRES - For Airflow 
+  # POSTGRES
   # ============================================
   postgres:
     image: postgres:15
@@ -148,7 +148,7 @@
       retries: 5
 
   # ============================================
-  # REDIS - For Airflow 
+  # REDIS
   # ============================================
   redis:
     image: redis:7-alpine
@@ -162,9 +162,9 @@
       interval: 10s
       timeout: 5s
       retries: 5
-# ============================================
-  # AIRFLOW WEBSERVER - Pipeline monitoring dashboard
-  # http://localhost:8085
+
+  # ============================================
+  # AIRFLOW WEBSERVER - http://localhost:8085
   # ============================================
   airflow-webserver:
     image: apache/airflow:2.8.1-python3.11
@@ -183,6 +183,7 @@
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
+      _PIP_ADDITIONAL_REQUIREMENTS: "pyarrow pandas psycopg2-binary"
     volumes:
       - ./orchestration/dags:/opt/airflow/dags
       - ./data:/opt/airflow/data
@@ -205,7 +206,7 @@
       start_period: 60s
 
   # ============================================
-  # AIRFLOW SCHEDULER - Triggers DAGs on schedule
+  # AIRFLOW SCHEDULER
   # ============================================
   airflow-scheduler:
     image: apache/airflow:2.8.1-python3.11
@@ -220,6 +221,7 @@
       AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres:5432/airflow
       AIRFLOW__CORE__FERNET_KEY: ''
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      _PIP_ADDITIONAL_REQUIREMENTS: "pyarrow pandas psycopg2-binary"
     volumes:
       - ./orchestration/dags:/opt/airflow/dags
       - ./data:/opt/airflow/data
@@ -229,7 +231,7 @@
       - climate-network
 
   # ============================================
-  # AIRFLOW WORKER - Executes tasks
+  # AIRFLOW WORKER
   # ============================================
   airflow-worker:
     image: apache/airflow:2.8.1-python3.11
@@ -244,6 +246,7 @@
       AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres:5432/airflow
       AIRFLOW__CORE__FERNET_KEY: ''
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      _PIP_ADDITIONAL_REQUIREMENTS: "pyarrow pandas psycopg2-binary"
     volumes:
       - ./orchestration/dags:/opt/airflow/dags
       - ./data:/opt/airflow/data
