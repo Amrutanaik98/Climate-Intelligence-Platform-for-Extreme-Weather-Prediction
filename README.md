@@ -638,10 +638,3 @@ BIGQUERY_DATASET=climate_warehouse
 
 ---
 
-## 📄 License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-*Built with ❤️ for climate resilience*
