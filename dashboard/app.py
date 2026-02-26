@@ -286,6 +286,7 @@ with tab_map:
         height=500,
         coloraxis_colorbar=dict(title="°F", tickfont=dict(color="#94a3b8")),
     )
+
     st.plotly_chart(fig_map, use_container_width=True)
 
     # Temperature bar chart
@@ -303,8 +304,8 @@ with tab_map:
     fig_bar.update_layout(
         paper_bgcolor="#06060e", plot_bgcolor="#0a0a16",
         font=dict(color="#94a3b8"), height=550,
-        xaxis=dict(title="Temperature (°F)", gridcolor="#ffffff08"),
-        yaxis=dict(gridcolor="#ffffff08"),
+        xaxis=dict(title="Temperature (°F)", gridcolor="rgba(255,255,255,0.03)"),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.03)"),
         margin=dict(l=0, r=60, t=10, b=40),
     )
     st.plotly_chart(fig_bar, use_container_width=True)
@@ -381,8 +382,8 @@ with tab_cities:
                 fig_fc.update_layout(
                     paper_bgcolor="#06060e", plot_bgcolor="#0a0a16",
                     font=dict(color="#94a3b8"), height=350,
-                    xaxis=dict(title="Hours Ahead", gridcolor="#ffffff08"),
-                    yaxis=dict(title="Temperature (°F)", gridcolor="#ffffff08"),
+                    xaxis=dict(title="Hours Ahead", gridcolor="rgba(255,255,255,0.03)"),
+                    yaxis=dict(title="Temperature (°F)", gridcolor="rgba(255,255,255,0.03)"),
                     margin=dict(l=0, r=0, t=10, b=40),
                 )
                 st.plotly_chart(fig_fc, use_container_width=True)
@@ -442,7 +443,7 @@ with tab_predictions:
     fig_scatter.update_layout(
         paper_bgcolor="#06060e", plot_bgcolor="#0a0a16",
         font=dict(color="#94a3b8"), height=400,
-        xaxis=dict(gridcolor="#ffffff08"), yaxis=dict(gridcolor="#ffffff08"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.03)"), yaxis=dict(gridcolor="rgba(255,255,255,0.03)"),
         margin=dict(l=0, r=0, t=10, b=40),
     )
     st.plotly_chart(fig_scatter, use_container_width=True)
@@ -495,7 +496,7 @@ with tab_regions:
             barmode="group",
             paper_bgcolor="#06060e", plot_bgcolor="#0a0a16",
             font=dict(color="#94a3b8"), height=400,
-            xaxis=dict(gridcolor="#ffffff08"), yaxis=dict(title="Temperature (°F)", gridcolor="#ffffff08"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.03)"), yaxis=dict(title="Temperature (°F)", gridcolor="rgba(255,255,255,0.03)"),
             legend=dict(font=dict(color="#94a3b8")),
             margin=dict(l=0, r=0, t=10, b=40),
         )
@@ -515,7 +516,7 @@ with tab_regions:
         fig_hw.update_layout(
             paper_bgcolor="#06060e", plot_bgcolor="#0a0a16",
             font=dict(color="#94a3b8"), height=400,
-            xaxis=dict(gridcolor="#ffffff08"), yaxis=dict(gridcolor="#ffffff08"),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.03)"), yaxis=dict(gridcolor="rgba(255,255,255,0.03)"),
             margin=dict(l=0, r=0, t=10, b=40),
         )
         st.plotly_chart(fig_hw, use_container_width=True)
