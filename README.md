@@ -604,37 +604,4 @@ kubectl get pods -n climate-platform
 
 ---
 
-## 🔑 Environment Variables
-
-```env
-# Weather API
-OPENWEATHER_API_KEY=your_key_here
-
-# Kafka
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-SCHEMA_REGISTRY_URL=http://localhost:8081
-
-# Gen AI
-GROQ_API_KEY=your_groq_key_here
-
-# MLflow
-MLFLOW_TRACKING_URI=file:./mlruns
-
-# PostgreSQL (local warehouse)
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_USER=airflow
-POSTGRES_PASSWORD=airflow
-POSTGRES_DB=airflow
-
-# GCP Configuration (for Week 8 deployment)
-GCP_PROJECT_ID=your_gcp_project_id
-GCP_REGION=us-central1
-GCS_BUCKET_BRONZE=climate-bronze
-GCS_BUCKET_SILVER=climate-silver
-GCS_BUCKET_GOLD=climate-gold
-BIGQUERY_DATASET=climate_warehouse
-```
-
----
 
