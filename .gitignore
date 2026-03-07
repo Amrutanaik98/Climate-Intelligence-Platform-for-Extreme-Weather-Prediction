@@ -1,4 +1,10 @@
-﻿# Python
+﻿.terraform/
+*.tfstate
+*.tfstate.backup
+infrastructure/terraform/gcp-key.json
+infrastructure/terraform/terraform.tfvars
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -32,3 +38,18 @@ data/
 # ML models (too large for Git)
 models/
 mlruns/
+
+
+
+# Terraform
+
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+terraform.tfvars
+
+# Secrets
+gcp-key.json.terraform/
+*.tfstate
+*.tfstate.backup

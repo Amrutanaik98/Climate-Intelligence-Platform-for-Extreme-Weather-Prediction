@@ -26,8 +26,9 @@ terraform {
 # ============================================
 
 provider "google" {
-  project = var.project_id
-  region  = var.region
+  project     = var.project_id
+  region      = var.region
+  credentials = file("gcp-key.json")
 }
 
 # ============================================
@@ -344,3 +345,4 @@ resource "google_monitoring_uptime_check_config" "api_health" {
 
   depends_on = [google_project_service.apis["monitoring.googleapis.com"]]
 }
+
