@@ -1,23 +1,22 @@
 """
-Gold Layer → PostgreSQL Data Warehouse Loader
-==============================================
-Reads Parquet from Gold layer and loads into the
-star schema (fact + dimension tables) in PostgreSQL.
+Gold Layer → PostgreSQL Data Warehouse Loader (Fixed)
+======================================================
+Matches the actual Gold layer schema produced by spark_batch_gold.py
 
-This same code works with BigQuery — just change the
-connection string and use google-cloud-bigquery library.
+Run: python orchestration/dags/load_warehouse.py
 """
 
 import os
 import logging
 import psycopg2
-import psycopg2.extras
-from datetime import datetime
+import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("WarehouseLoader")
 
-# Database connection
 DB_CONFIG = {
     "host": os.getenv("POSTGRES_HOST", "localhost"),
     "port": int(os.getenv("POSTGRES_PORT", "5432")),
@@ -26,51 +25,88 @@ DB_CONFIG = {
     "password": os.getenv("POSTGRES_PASSWORD", "airflow"),
 }
 
+GOLD_PATH = "data/gold/weather_features"
 
-def get_connection():
-    """Get PostgreSQL connection."""
+
+def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
-def load_dim_location(conn, locations):
-    """
-    Load/update the location dimension table.
-    Uses UPSERT (insert or update) — if the city already exists,
-    just update the timestamp. This is SCD Type 1 (overwrite).
-    """
-    cursor = conn.cursor()
+def create_schema(conn):
+    """Create schema and all tables if they don't exist."""
+    cur = conn.cursor()
 
-    insert_sql = """
-        INSERT INTO climate_warehouse.dim_location (city, state, country, latitude, longitude, region)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (city, state)
-        DO UPDATE SET updated_at = CURRENT_TIMESTAMP
-        RETURNING location_key;
-    """
+    cur.execute("CREATE SCHEMA IF NOT EXISTS climate_warehouse")
 
-    location_keys = {}
+    # dim_location
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS climate_warehouse.dim_location (
+            location_key SERIAL PRIMARY KEY,
+            city VARCHAR(100) NOT NULL,
+            state VARCHAR(50),
+            latitude FLOAT,
+            longitude FLOAT,
+            region VARCHAR(50),
+            UNIQUE(city, state)
+        )
+    """)
 
-    for loc in locations:
-        # Assign region based on state
-        region = get_region(loc.get("state", "Unknown"))
+    # dim_time
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS climate_warehouse.dim_time (
+            time_key SERIAL PRIMARY KEY,
+            reading_timestamp TIMESTAMP,
+            hour INT,
+            day_of_week INT,
+            month INT,
+            year INT,
+            is_daytime INT,
+            UNIQUE(reading_timestamp)
+        )
+    """)
 
-        cursor.execute(insert_sql, (
-            loc["city"],
-            loc.get("state", "Unknown"),
-            loc.get("country", "US"),
-            loc["latitude"],
-            loc["longitude"],
-            region,
-        ))
-        location_keys[(loc["city"], loc.get("state", "Unknown"))] = cursor.fetchone()[0]
+    # dim_weather_type
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS climate_warehouse.dim_weather_type (
+            weather_type_key SERIAL PRIMARY KEY,
+            weather_condition VARCHAR(100),
+            weather_group VARCHAR(50),
+            UNIQUE(weather_condition)
+        )
+    """)
+
+    # fact_weather_readings
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS climate_warehouse.fact_weather_readings (
+            reading_key SERIAL PRIMARY KEY,
+            location_key INT REFERENCES climate_warehouse.dim_location(location_key),
+            time_key INT,
+            weather_type_key INT,
+            temperature_fahrenheit FLOAT,
+            temperature_celsius FLOAT,
+            humidity_percent FLOAT,
+            pressure_hpa FLOAT,
+            wind_speed_mph FLOAT,
+            wind_direction_degrees FLOAT,
+            precipitation_mm FLOAT,
+            visibility_miles FLOAT,
+            cloud_cover_percent FLOAT,
+            heat_index FLOAT,
+            wind_chill FLOAT,
+            temperature_anomaly FLOAT,
+            temp_anomaly_score FLOAT,
+            is_extreme_weather INT,
+            data_quality_score FLOAT,
+            loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
 
     conn.commit()
-    logger.info(f"✅ Loaded {len(location_keys)} locations into dim_location")
-    return location_keys
+    logger.info("✅ Schema and tables created/verified")
 
 
 def get_region(state):
-    """Map US states to regions."""
+    """Map states to regions."""
     regions = {
         "Northeast": ["NY", "MA", "PA", "CT", "NJ", "ME", "NH", "VT", "RI"],
         "Southeast": ["FL", "GA", "NC", "SC", "VA", "TN", "AL", "MS", "LA", "AR", "KY"],
@@ -82,90 +118,86 @@ def get_region(state):
     for region, states in regions.items():
         if state in states:
             return region
-    return "Unknown"
+    return "Other"
 
 
-def get_time_key(conn, timestamp_str):
-    """Look up the time_key for a given timestamp."""
-    cursor = conn.cursor()
-    # Round to nearest hour for lookup
-    try:
-        ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-        rounded = ts.replace(minute=0, second=0, microsecond=0)
-        cursor.execute(
-            "SELECT time_key FROM climate_warehouse.dim_time WHERE full_timestamp = %s",
-            (rounded,)
-        )
-        result = cursor.fetchone()
-        return result[0] if result else None
-    except Exception:
-        return None
+def load_dimensions(conn, gold_df):
+    """Load dimension tables from Gold data."""
+    cur = conn.cursor()
 
-
-def get_weather_type_key(conn, condition):
-    """Look up or create weather type dimension entry."""
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT weather_type_key FROM climate_warehouse.dim_weather_type WHERE condition = %s",
-        (condition,)
-    )
-    result = cursor.fetchone()
-    if result:
-        return result[0]
-
-    # Insert new condition
-    cursor.execute(
-        """INSERT INTO climate_warehouse.dim_weather_type (condition, category, severity)
-           VALUES (%s, 'Unknown', 'Normal') RETURNING weather_type_key""",
-        (condition,)
-    )
+    # ── dim_location ──
+    cities = gold_df.drop_duplicates(subset=["city"])
+    loc_count = 0
+    for _, row in cities.iterrows():
+        state = str(row.get("state", ""))
+        region = get_region(state)
+        cur.execute("""
+            INSERT INTO climate_warehouse.dim_location (city, state, latitude, longitude, region)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (city, state) DO NOTHING
+        """, (row["city"], state, row.get("latitude"), row.get("longitude"), region))
+        loc_count += 1
     conn.commit()
-    return cursor.fetchone()[0]
+    logger.info(f"✅ dim_location: {loc_count} cities loaded")
+
+    # ── dim_weather_type ──
+    if "weather_condition" in gold_df.columns:
+        conditions = gold_df["weather_condition"].dropna().unique()
+        group_map = {
+            "Clear": "Clear", "Clouds": "Cloudy", "Rain": "Precipitation",
+            "Drizzle": "Precipitation", "Snow": "Precipitation", "Mist": "Fog",
+            "Fog": "Fog", "Haze": "Fog", "Thunderstorm": "Severe",
+        }
+        wt_count = 0
+        for cond in conditions:
+            group = group_map.get(str(cond), "Other")
+            cur.execute("""
+                INSERT INTO climate_warehouse.dim_weather_type (weather_condition, weather_group)
+                VALUES (%s, %s) ON CONFLICT (weather_condition) DO NOTHING
+            """, (str(cond), group))
+            wt_count += 1
+        conn.commit()
+        logger.info(f"✅ dim_weather_type: {wt_count} conditions loaded")
+
+    # ── Build lookup maps ──
+    cur.execute("SELECT location_key, city FROM climate_warehouse.dim_location")
+    loc_map = {row[1]: row[0] for row in cur.fetchall()}
+
+    cur.execute("SELECT weather_type_key, weather_condition FROM climate_warehouse.dim_weather_type")
+    wt_map = {row[1]: row[0] for row in cur.fetchall()}
+
+    return loc_map, wt_map
 
 
-def load_fact_readings(conn, gold_data, location_keys):
-   
-    cursor = conn.cursor()
+def load_facts(conn, gold_df, loc_map, wt_map):
+    """Load fact table from Gold data."""
+    cur = conn.cursor()
 
-    insert_sql = """
-        INSERT INTO climate_warehouse.fact_weather_readings (
-            location_key, time_key, weather_type_key,
-            temperature_fahrenheit, temperature_celsius,
-            humidity_percent, pressure_hpa, wind_speed_mph,
-            wind_direction_degrees, precipitation_mm,
-            visibility_km, cloud_cover_percent, uv_index,
-            heat_index, wind_chill, temp_anomaly, temp_anomaly_score,
-            is_extreme_weather, is_heatwave, is_extreme_cold,
-            is_high_wind, is_heavy_precipitation,
-            source, quality_flag
-        ) VALUES (
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s
-        )
-    """
+    # Clear old data and reload
+    cur.execute("TRUNCATE climate_warehouse.fact_weather_readings RESTART IDENTITY")
 
-    records_loaded = 0
-    records_skipped = 0
+    loaded = 0
+    skipped = 0
 
-    for row in gold_data:
-        # Look up dimension keys
-        loc_key = location_keys.get(
-            (row.get("city", ""), row.get("state", "Unknown")),
-            None
-        )
-        time_key = get_time_key(conn, row.get("timestamp", ""))
-        weather_key = get_weather_type_key(
-            conn, row.get("weather_condition", "Unknown")
-        )
+    for _, row in gold_df.iterrows():
+        loc_key = loc_map.get(row.get("city"))
+        wt_key = wt_map.get(str(row.get("weather_condition", "")))
 
-        if loc_key is None:
-            records_skipped += 1
+        if not loc_key:
+            skipped += 1
             continue
 
         try:
-            cursor.execute(insert_sql, (
-                loc_key, time_key, weather_key,
+            cur.execute("""
+                INSERT INTO climate_warehouse.fact_weather_readings
+                (location_key, weather_type_key, temperature_fahrenheit, temperature_celsius,
+                 humidity_percent, pressure_hpa, wind_speed_mph, wind_direction_degrees,
+                 precipitation_mm, visibility_miles, cloud_cover_percent, heat_index,
+                 wind_chill, temperature_anomaly, temp_anomaly_score, is_extreme_weather,
+                 data_quality_score)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (
+                loc_key, wt_key,
                 row.get("temperature_fahrenheit"),
                 row.get("temperature_celsius"),
                 row.get("humidity_percent"),
@@ -173,88 +205,67 @@ def load_fact_readings(conn, gold_data, location_keys):
                 row.get("wind_speed_mph"),
                 row.get("wind_direction_degrees"),
                 row.get("precipitation_mm"),
-                row.get("visibility_km"),
+                row.get("visibility_miles"),
                 row.get("cloud_cover_percent"),
-                row.get("uv_index"),
                 row.get("heat_index"),
                 row.get("wind_chill"),
-                row.get("temp_anomaly"),
+                row.get("temperature_anomaly"),
                 row.get("temp_anomaly_score"),
-                row.get("is_extreme_weather", 0),
-                row.get("is_heatwave", 0),
-                row.get("is_extreme_cold", 0),
-                row.get("is_high_wind", 0),
-                row.get("is_heavy_precipitation", 0),
-                row.get("source", "Unknown"),
-                row.get("quality_flag", "Unknown"),
+                row.get("is_extreme_weather"),
+                row.get("data_quality_score", 1.0),
             ))
-            records_loaded += 1
+            loaded += 1
         except Exception as e:
-            logger.error(f"Error loading record: {e}")
-            records_skipped += 1
+            logger.error(f"Error: {e}")
+            skipped += 1
 
     conn.commit()
-    logger.info(f"✅ Loaded {records_loaded} records into fact_weather_readings")
-    logger.info(f"   Skipped: {records_skipped}")
+    logger.info(f"✅ fact_weather_readings: {loaded} loaded, {skipped} skipped")
+    return loaded
 
 
 def load_gold_to_warehouse():
-    """
-    Main function: Read Gold Parquet → Load into Star Schema.
-    """
+    """Main: Read Gold Parquet → Load into Star Schema."""
     logger.info("=" * 60)
     logger.info("📦 WAREHOUSE LOADER: Gold → PostgreSQL Star Schema")
     logger.info("=" * 60)
 
-    # Read Gold data using PySpark
-    try:
-        from pyspark.sql import SparkSession
-
-        spark = (
-            SparkSession.builder
-            .appName("WarehouseLoader")
-            .master("local[*]")
-            .getOrCreate()
-        )
-        spark.sparkContext.setLogLevel("WARN")
-
-        gold_path = "data/gold/weather_features"
-        if not os.path.exists(gold_path):
-            logger.error("❌ Gold layer not found! Run Gold job first.")
-            return
-
-        gold_df = spark.read.parquet(gold_path)
-        gold_data = [row.asDict() for row in gold_df.collect()]
-        logger.info(f"📥 Read {len(gold_data)} records from Gold layer")
-        spark.stop()
-
-    except Exception as e:
-        logger.error(f"❌ Error reading Gold data: {e}")
+    # Check Gold data exists
+    if not os.path.exists(GOLD_PATH):
+        logger.error(f"❌ Gold layer not found at {GOLD_PATH}. Run spark_batch_gold.py first.")
         return
 
-    # Connect to PostgreSQL
-    conn = get_connection()
+    # Read Gold with pandas (fast, no Spark needed)
+    logger.info(f"📂 Reading Gold data from: {GOLD_PATH}")
+    gold_df = pd.read_parquet(GOLD_PATH)
+    logger.info(f"📥 Read {len(gold_df)} records, {len(gold_df.columns)} columns")
+    logger.info(f"   Cities: {gold_df['city'].nunique()}")
+    logger.info(f"   Columns: {list(gold_df.columns)}")
 
-    # Extract unique locations
-    locations = []
-    seen = set()
-    for row in gold_data:
-        key = (row.get("city", ""), row.get("state", "Unknown"))
-        if key not in seen:
-            locations.append({
-                "city": row.get("city", ""),
-                "state": row.get("state", "Unknown"),
-                "country": row.get("country", "US"),
-                "latitude": row.get("latitude", 0),
-                "longitude": row.get("longitude", 0),
-            })
-            seen.add(key)
+    # Connect to PostgreSQL
+    conn = get_conn()
+
+    # Create schema and tables
+    create_schema(conn)
 
     # Load dimensions
-    location_keys = load_dim_location(conn, locations)
+    loc_map, wt_map = load_dimensions(conn, gold_df)
+    logger.info(f"   Location map: {len(loc_map)} cities")
+    logger.info(f"   Weather type map: {len(wt_map)} conditions")
 
     # Load facts
-    load_fact_readings(conn, gold_data, location_keys)
+    loaded = load_facts(conn, gold_df, loc_map, wt_map)
+
+    # Verify
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings")
+    total = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE is_extreme_weather = 1")
+    extreme = cur.fetchone()[0]
+    logger.info(f"\n📊 Warehouse Summary:")
+    logger.info(f"   Total records: {total}")
+    logger.info(f"   Extreme events: {extreme}")
+    logger.info(f"   Cities: {len(loc_map)}")
 
     conn.close()
     logger.info("\n✅ Warehouse loading complete!")
