@@ -4,10 +4,7 @@ LSTM Temperature Forecasting
 Uses PyTorch LSTM to predict future temperature based on
 a sequence of past weather readings.
 
-What LSTM does:
-1. Takes a window of past readings (e.g., last 7 readings)
-2. Learns patterns in the sequence
-3. Predicts the next temperature value
+Run: python ml/train_lstm.py
 """
 
 import os
@@ -36,11 +33,11 @@ logger = logging.getLogger("LSTMTrainer")
 class WeatherLSTM(nn.Module):
     """
     LSTM Neural Network for temperature prediction.
-    
+
     Architecture:
     - Input layer: takes sequence of weather features
-    - LSTM layers: learn temporal patterns (what came before matters)
-    - Dropout: prevents overfitting (randomly disables neurons during training)
+    - LSTM layers: learn temporal patterns
+    - Dropout: prevents overfitting
     - Linear output: produces single temperature prediction
     """
     def __init__(self, input_size, hidden_size=64, num_layers=2, dropout=0.2):
@@ -56,12 +53,10 @@ class WeatherLSTM(nn.Module):
             dropout=dropout if num_layers > 1 else 0,
         )
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, 1)  # Output: 1 temperature value
+        self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
-        # x shape: (batch_size, sequence_length, input_size)
         lstm_out, _ = self.lstm(x)
-        # Take the output of the LAST time step
         last_output = lstm_out[:, -1, :]
         out = self.dropout(last_output)
         out = self.fc(out)
@@ -75,35 +70,41 @@ class WeatherLSTM(nn.Module):
 def load_and_prepare_data(sequence_length=7):
     """
     Load Gold data and create sequences for LSTM.
-    
+
     WHAT IS A SEQUENCE?
     Instead of feeding one row at a time, LSTM needs a WINDOW of rows.
-    
+
     If sequence_length=7, we create:
-    Input:  [reading_1, reading_2, reading_3, reading_4, reading_5, reading_6, reading_7]
+    Input:  [reading_1, reading_2, ..., reading_7]
     Target: temperature at reading_8
-    
-    Then slide the window:
-    Input:  [reading_2, reading_3, reading_4, reading_5, reading_6, reading_7, reading_8]
-    Target: temperature at reading_9
-    
-    And so on. This teaches the model: "Given this history, what comes next?"
+
+    Then slide the window forward and repeat.
     """
     logger.info("📥 Loading data for LSTM...")
 
-    from pyspark.sql import SparkSession
-    spark = SparkSession.builder.appName("LSTM").master("local[*]").getOrCreate()
-    spark.sparkContext.setLogLevel("ERROR")
-    df = spark.read.parquet("data/gold/weather_features").toPandas()
-    spark.stop()
+    # Fast pandas read (no Spark needed)
+    df = pd.read_parquet("data/gold/weather_features")
+    logger.info(f"   Loaded {len(df)} records, {df['city'].nunique()} cities")
 
     # Features to use for LSTM
     feature_cols = [
-        'temperature_fahrenheit', 'humidity_percent', 'pressure_hpa',
-        'wind_speed_mph', 'heat_index', 'wind_chill',
+        'temperature_fahrenheit',
+        'humidity_percent',
+        'pressure_hpa',
+        'wind_speed_mph',
+        'heat_index',
+        'wind_chill',
     ]
 
     available = [c for c in feature_cols if c in df.columns]
+    logger.info(f"   Using features: {available}")
+
+    # Sort by city and timestamp for proper sequences
+    if 'timestamp' in df.columns:
+        df = df.sort_values(['city', 'timestamp'])
+    elif 'ingestion_timestamp' in df.columns:
+        df = df.sort_values(['city', 'ingestion_timestamp'])
+
     data = df[available].fillna(method='ffill').fillna(0).values
 
     # Scale data to 0-1 range (neural networks work better with normalized data)
@@ -138,13 +139,13 @@ def train_lstm(X_train, y_train, X_val, y_val, input_size, epochs=50):
     X_val_t = torch.FloatTensor(X_val)
     y_val_t = torch.FloatTensor(y_val).unsqueeze(1)
 
-    # Create data loaders (batches data for efficient training)
+    # Create data loaders
     train_dataset = TensorDataset(X_train_t, y_train_t)
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
     # Initialize model
     model = WeatherLSTM(input_size=input_size, hidden_size=64, num_layers=2)
-    criterion = nn.MSELoss()  # Mean Squared Error (for regression)
+    criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
     # Training loop
@@ -184,10 +185,18 @@ def main():
     print("🧠 LSTM - Temperature Forecasting")
     print("=" * 60)
 
+    # Create directories
+    os.makedirs("ml/plots", exist_ok=True)
+    os.makedirs("ml/models", exist_ok=True)
+
     SEQUENCE_LENGTH = 7
 
     # Step 1: Load and prepare data
     X, y, scaler, features = load_and_prepare_data(SEQUENCE_LENGTH)
+
+    if len(X) < 10:
+        logger.error("❌ Not enough data for LSTM training. Need more readings.")
+        return
 
     # Step 2: Train/test split (keep time order! Don't shuffle time-series)
     split = int(len(X) * 0.8)
@@ -206,6 +215,9 @@ def main():
         mlflow.log_param("num_layers", 2)
         mlflow.log_param("epochs", 50)
         mlflow.log_param("learning_rate", 0.001)
+        mlflow.log_param("n_features", len(features))
+        mlflow.log_param("train_size", len(X_train))
+        mlflow.log_param("test_size", len(X_test))
 
         # Train
         model, train_losses, val_losses = train_lstm(
@@ -230,35 +242,40 @@ def main():
 
         # Save training loss plot
         plt.figure(figsize=(10, 5))
-        plt.plot(train_losses, label='Train Loss')
-        plt.plot(val_losses, label='Validation Loss')
+        plt.plot(train_losses, label='Train Loss', color='#22d3ee')
+        plt.plot(val_losses, label='Validation Loss', color='#f87171')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.title('LSTM Training Progress')
         plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig("ml/plots/lstm_training_loss.png", dpi=150)
         plt.close()
         mlflow.log_artifact("ml/plots/lstm_training_loss.png")
+        logger.info("   Training loss plot saved to ml/plots/lstm_training_loss.png")
 
         # Save predictions vs actual plot
         plt.figure(figsize=(12, 5))
-        plt.plot(y_test[:100], label='Actual', alpha=0.7)
-        plt.plot(predictions[:100], label='Predicted', alpha=0.7)
+        plt.plot(y_test[:100], label='Actual', alpha=0.7, color='#22d3ee')
+        plt.plot(predictions[:100], label='Predicted', alpha=0.7, color='#f87171')
         plt.xlabel('Time Step')
         plt.ylabel('Temperature (scaled)')
         plt.title('LSTM: Predicted vs Actual Temperature')
         plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
         plt.savefig("ml/plots/lstm_predictions.png", dpi=150)
         plt.close()
         mlflow.log_artifact("ml/plots/lstm_predictions.png")
+        logger.info("   Predictions plot saved to ml/plots/lstm_predictions.png")
 
         # Save model
         torch.save(model.state_dict(), "ml/models/lstm_model.pth")
         mlflow.log_artifact("ml/models/lstm_model.pth")
 
         logger.info(f"\n✅ LSTM training complete!")
+        logger.info(f"   Model saved to: ml/models/lstm_model.pth")
         logger.info(f"   View in MLflow: mlflow ui --port 5555")
 
 
