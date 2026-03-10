@@ -4,15 +4,7 @@ XGBoost Classifier for Extreme Weather Prediction
 Reads Gold layer data, trains an XGBoost model to predict
 whether weather conditions are extreme (heatwave, storm, etc.)
 
-What this script does:
-1. Load data from Gold layer (Parquet)
-2. Prepare features (X) and target (y)
-3. Split into train/test sets
-4. Train XGBoost classifier
-5. Evaluate model performance
-6. Log everything to MLflow
-7. Generate SHAP explanations
-8. Save model
+Run: python ml/train_xgboost.py
 """
 
 import os
@@ -24,7 +16,7 @@ import mlflow
 import mlflow.xgboost
 import shap
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend (no window popup)
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -40,40 +32,24 @@ logger = logging.getLogger("XGBoostTrainer")
 
 
 def load_gold_data():
-    """
-    Load Gold layer data using PySpark, convert to Pandas DataFrame.
-    
-    WHY PySpark first? Because Gold data is in Parquet format (big data format).
-    PySpark reads it, then we convert to Pandas for ML (scikit-learn/XGBoost
-    work with Pandas, not Spark DataFrames).
-    """
+    """Load Gold layer data using pandas (fast, no Spark needed)."""
     logger.info("📥 Loading Gold layer data...")
-
-    from pyspark.sql import SparkSession
-    spark = (
-        SparkSession.builder
-        .appName("XGBoost-DataLoad")
-        .master("local[*]")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("ERROR")
 
     gold_path = "data/gold/weather_features"
     if not os.path.exists(gold_path):
         logger.error("❌ Gold layer not found!")
         return None
 
-    df = spark.read.parquet(gold_path).toPandas()
-    spark.stop()
-
+    df = pd.read_parquet(gold_path)
     logger.info(f"   Loaded {len(df)} records with {len(df.columns)} features")
+    logger.info(f"   Cities: {df['city'].nunique()}")
     return df
 
 
 def prepare_features(df):
     """
     Prepare features (X) and target (y) for ML training.
-    
+
     FEATURE SELECTION: We pick the columns that the model will use to
     make predictions. We EXCLUDE:
     - Target variable (is_extreme_weather) — that's what we're predicting!
@@ -85,7 +61,6 @@ def prepare_features(df):
     """
     logger.info("🔧 Preparing features...")
 
-    # These are the features the model will use to predict
     feature_columns = [
         'temperature_fahrenheit',
         'temperature_celsius',
@@ -94,11 +69,11 @@ def prepare_features(df):
         'wind_speed_mph',
         'wind_direction_degrees',
         'precipitation_mm',
-        'visibility_km',
+        'visibility_miles',
         'cloud_cover_percent',
         'heat_index',
         'wind_chill',
-        'temp_anomaly',
+        'temperature_anomaly',
         'temp_anomaly_score',
         'city_avg_temp',
         'city_min_temp',
@@ -115,12 +90,12 @@ def prepare_features(df):
 
     # Only keep columns that exist in the data
     available_features = [col for col in feature_columns if col in df.columns]
-    logger.info(f"   Using {len(available_features)} features")
+    logger.info(f"   Using {len(available_features)} features: {available_features}")
 
     X = df[available_features].copy()
     y = df['is_extreme_weather'].copy()
 
-    # Handle any remaining nulls (fill with -1 to signal "missing")
+    # Handle any remaining nulls
     X = X.fillna(-1)
 
     # Convert any non-numeric columns
@@ -138,8 +113,8 @@ def prepare_features(df):
 def train_xgboost(X_train, y_train, X_test, y_test):
     """
     Train XGBoost classifier.
-    
-    HYPERPARAMETERS (settings that control how the model learns):
+
+    HYPERPARAMETERS:
     - n_estimators: How many trees to build (more = better but slower)
     - max_depth: How deep each tree can be (deeper = more complex)
     - learning_rate: How much each tree contributes (smaller = more careful)
@@ -147,28 +122,23 @@ def train_xgboost(X_train, y_train, X_test, y_test):
     """
     logger.info("🏋️ Training XGBoost model...")
 
-    # Calculate class imbalance ratio
-    # WHY? If 98% of data is "normal" and 2% is "extreme", the model could
-    # just always predict "normal" and get 98% accuracy (but miss all extremes!)
-    # scale_pos_weight tells the model to pay MORE attention to extreme events.
     n_normal = sum(y_train == 0)
     n_extreme = max(sum(y_train == 1), 1)
     scale_weight = n_normal / n_extreme
 
     model = xgb.XGBClassifier(
-        n_estimators=200,           # Build 200 trees
-        max_depth=6,                # Each tree can be 6 levels deep
-        learning_rate=0.1,          # Each tree contributes 10%
-        scale_pos_weight=scale_weight,  # Pay more attention to rare extreme events
-        random_state=42,            # Reproducible results
-        eval_metric='logloss',      # Loss function for binary classification
+        n_estimators=200,
+        max_depth=6,
+        learning_rate=0.1,
+        scale_pos_weight=scale_weight,
+        random_state=42,
+        eval_metric='logloss',
         use_label_encoder=False,
     )
 
-    # Train the model
     model.fit(
         X_train, y_train,
-        eval_set=[(X_test, y_test)],  # Monitor performance on test set
+        eval_set=[(X_test, y_test)],
         verbose=False
     )
 
@@ -177,15 +147,7 @@ def train_xgboost(X_train, y_train, X_test, y_test):
 
 
 def evaluate_model(model, X_test, y_test):
-    """
-    Evaluate model performance with multiple metrics.
-    
-    WHY multiple metrics?
-    - Accuracy alone is misleading for imbalanced data
-    - Precision: "When model says extreme, how often is it right?"
-    - Recall: "Of all actual extreme events, how many did model catch?"
-    - F1: Balance of precision and recall
-    """
+    """Evaluate model performance with multiple metrics."""
     logger.info("📊 Evaluating model...")
 
     y_pred = model.predict(X_test)
@@ -202,7 +164,6 @@ def evaluate_model(model, X_test, y_test):
     logger.info(f"   Recall:    {metrics['recall']:.4f}")
     logger.info(f"   F1 Score:  {metrics['f1_score']:.4f}")
 
-    # Detailed classification report
     print("\n" + classification_report(y_test, y_pred,
           target_names=["Normal", "Extreme Weather"]))
 
@@ -212,18 +173,9 @@ def evaluate_model(model, X_test, y_test):
 def generate_shap_explanations(model, X_test, feature_names):
     """
     Generate SHAP (SHapley Additive exPlanations) values.
-    
-    WHAT IS SHAP?
+
     SHAP tells you WHY the model made each prediction.
-    
-    Example: Model predicts "EXTREME WEATHER" for a record.
-    SHAP says: "Because temperature was +15 impact, humidity was +10 impact,
-    pressure was -3 impact. Temperature and humidity drove this prediction."
-    
-    This is CRITICAL for trust. A doctor won't use an AI that just says
-    "the patient is sick" without explaining why. Same for weather prediction.
-    
-    The SHAP summary plot shows which features matter MOST across all predictions.
+    The summary plot shows which features matter MOST across all predictions.
     """
     logger.info("🔍 Generating SHAP explanations...")
 
@@ -231,7 +183,7 @@ def generate_shap_explanations(model, X_test, feature_names):
         explainer = shap.TreeExplainer(model)
         shap_values = explainer.shap_values(X_test)
 
-        # Save SHAP summary plot
+        # SHAP summary plot (dot plot)
         plt.figure(figsize=(12, 8))
         shap.summary_plot(shap_values, X_test, feature_names=feature_names,
                          show=False, max_display=15)
@@ -240,7 +192,7 @@ def generate_shap_explanations(model, X_test, feature_names):
         plt.close()
         logger.info("   SHAP summary plot saved to ml/plots/shap_summary.png")
 
-        # Save SHAP feature importance plot
+        # SHAP feature importance (bar plot)
         plt.figure(figsize=(12, 8))
         shap.summary_plot(shap_values, X_test, feature_names=feature_names,
                          plot_type="bar", show=False, max_display=15)
@@ -277,6 +229,10 @@ def main():
     print("🤖 XGBOOST - Extreme Weather Classification")
     print("=" * 60)
 
+    # Create plots directory
+    os.makedirs("ml/plots", exist_ok=True)
+    os.makedirs("ml/models", exist_ok=True)
+
     # Step 1: Load data
     df = load_gold_data()
     if df is None:
@@ -286,25 +242,16 @@ def main():
     X, y, feature_names = prepare_features(df)
 
     # Step 3: Split into train (80%) and test (20%)
-    # WHY split? We train on 80% and test on 20% the model has NEVER seen.
-    # This tells us how well the model generalizes to new data.
-    # If we tested on training data, the model would just memorize answers.
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
     logger.info(f"📊 Train: {len(X_train)} samples | Test: {len(X_test)} samples")
 
-    # Step 4: Start MLflow experiment tracking
-    # WHY MLflow? Every time you train a model, you want to record:
-    # - What parameters you used
-    # - What metrics you got
-    # - Which model file was produced
-    # So you can compare experiments and pick the best one.
+    # Step 4: MLflow experiment tracking
     mlflow.set_tracking_uri("file:./mlruns")
     mlflow.set_experiment("climate-extreme-weather-classification")
 
     with mlflow.start_run(run_name="xgboost-baseline"):
-        # Log parameters
         mlflow.log_param("model_type", "XGBoost")
         mlflow.log_param("n_estimators", 200)
         mlflow.log_param("max_depth", 6)
@@ -312,6 +259,7 @@ def main():
         mlflow.log_param("train_size", len(X_train))
         mlflow.log_param("test_size", len(X_test))
         mlflow.log_param("n_features", len(feature_names))
+        mlflow.log_param("n_cities", df['city'].nunique())
 
         # Step 5: Train
         model = train_xgboost(X_train, y_train, X_test, y_test)
@@ -319,7 +267,6 @@ def main():
         # Step 6: Evaluate
         metrics, y_pred = evaluate_model(model, X_test, y_test)
 
-        # Log metrics to MLflow
         for metric_name, metric_value in metrics.items():
             mlflow.log_metric(metric_name, metric_value)
 
@@ -329,19 +276,19 @@ def main():
         # Step 8: Confusion matrix
         save_confusion_matrix(y_test, y_pred)
 
-        # Step 9: Log model to MLflow
+        # Step 9: Save model
+        model.save_model("ml/models/xgboost_model.json")
         mlflow.xgboost.log_model(model, "xgboost-model")
 
-        # Log plots as artifacts
-        if os.path.exists("ml/plots/shap_summary.png"):
-            mlflow.log_artifact("ml/plots/shap_summary.png")
-        if os.path.exists("ml/plots/shap_importance.png"):
-            mlflow.log_artifact("ml/plots/shap_importance.png")
-        if os.path.exists("ml/plots/confusion_matrix.png"):
-            mlflow.log_artifact("ml/plots/confusion_matrix.png")
+        # Log plots
+        for plot in ["shap_summary.png", "shap_importance.png", "confusion_matrix.png"]:
+            path = f"ml/plots/{plot}"
+            if os.path.exists(path):
+                mlflow.log_artifact(path)
 
         logger.info(f"\n✅ XGBoost training complete!")
-        logger.info(f"   MLflow run logged. View with: mlflow ui")
+        logger.info(f"   Model saved to: ml/models/xgboost_model.json")
+        logger.info(f"   View in MLflow: mlflow ui --port 5555")
 
 
 if __name__ == "__main__":
