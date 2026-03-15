@@ -1,36 +1,39 @@
 -- ============================================================
 -- Climate Intelligence Platform - Star Schema Data Warehouse
+-- FIXED: Aligned with 80-city global Kafka producer schema
 -- ============================================================
--- This creates the dimensional model in PostgreSQL.
--- In production, this would be in BigQuery instead.
--- The SQL is almost identical for both.
+-- Changes from original:
+--   1. dim_location: added continent, changed UNIQUE to (city, country)
+--      to handle 80 global cities (most have NULL state)
+--   2. dim_weather_type: added weather_description column
+--   3. fact table: no changes (visibility_km, uv_index stay as-is)
 -- ============================================================
 
--- Create a separate schema for the warehouse
 CREATE SCHEMA IF NOT EXISTS climate_warehouse;
 
 -- ============================================================
 -- DIMENSION: dim_location
--- Contains geographic information about weather stations/cities
+-- FIXED: Added continent, changed unique key to (city, country)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS climate_warehouse.dim_location (
     location_key    SERIAL PRIMARY KEY,
     city            VARCHAR(100) NOT NULL,
-    state           VARCHAR(50),
     country         VARCHAR(50) DEFAULT 'US',
+    continent       VARCHAR(50),
+    state           VARCHAR(50),
     latitude        DOUBLE PRECISION NOT NULL,
     longitude       DOUBLE PRECISION NOT NULL,
     region          VARCHAR(50),
-    -- Slowly Changing Dimension Type 1 (overwrite)
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (city, state)
+    -- FIXED: Use (city, country) instead of (city, state)
+    -- because 70+ global cities have NULL state
+    UNIQUE (city, country)
 );
 
 -- ============================================================
 -- DIMENSION: dim_time
--- Pre-populated time dimension for fast date-based queries
--- Contains every hour for a full year
+-- Pre-populated hourly timestamps for 2 years
 -- ============================================================
 CREATE TABLE IF NOT EXISTS climate_warehouse.dim_time (
     time_key        SERIAL PRIMARY KEY,
@@ -52,7 +55,7 @@ CREATE TABLE IF NOT EXISTS climate_warehouse.dim_time (
 
 -- ============================================================
 -- DIMENSION: dim_weather_type
--- Categorizes weather conditions
+-- FIXED: Added weather_description from producer
 -- ============================================================
 CREATE TABLE IF NOT EXISTS climate_warehouse.dim_weather_type (
     weather_type_key  SERIAL PRIMARY KEY,
@@ -65,8 +68,7 @@ CREATE TABLE IF NOT EXISTS climate_warehouse.dim_weather_type (
 
 -- ============================================================
 -- FACT: fact_weather_readings
--- The main fact table with all measurements
--- Foreign keys link to dimension tables
+-- All measurements + engineered features
 -- ============================================================
 CREATE TABLE IF NOT EXISTS climate_warehouse.fact_weather_readings (
     reading_key             SERIAL PRIMARY KEY,
@@ -74,7 +76,7 @@ CREATE TABLE IF NOT EXISTS climate_warehouse.fact_weather_readings (
     location_key            INT REFERENCES climate_warehouse.dim_location(location_key),
     time_key                INT REFERENCES climate_warehouse.dim_time(time_key),
     weather_type_key        INT REFERENCES climate_warehouse.dim_weather_type(weather_type_key),
-    -- Measurements (what we want to analyze)
+    -- Measurements
     temperature_fahrenheit  DOUBLE PRECISION,
     temperature_celsius     DOUBLE PRECISION,
     humidity_percent        DOUBLE PRECISION,
@@ -103,7 +105,7 @@ CREATE TABLE IF NOT EXISTS climate_warehouse.fact_weather_readings (
 );
 
 -- ============================================================
--- INDEXES for faster queries
+-- INDEXES
 -- ============================================================
 CREATE INDEX IF NOT EXISTS idx_fact_location ON climate_warehouse.fact_weather_readings(location_key);
 CREATE INDEX IF NOT EXISTS idx_fact_time ON climate_warehouse.fact_weather_readings(time_key);
@@ -112,28 +114,35 @@ CREATE INDEX IF NOT EXISTS idx_fact_extreme ON climate_warehouse.fact_weather_re
 
 -- ============================================================
 -- POPULATE dim_weather_type with known conditions
+-- These match OpenWeatherMap API "main" field values
 -- ============================================================
 INSERT INTO climate_warehouse.dim_weather_type (condition, category, severity, description)
 VALUES
     ('Clear', 'Fair', 'Normal', 'Clear skies'),
     ('Partly Cloudy', 'Fair', 'Normal', 'Partially cloudy skies'),
     ('Cloudy', 'Overcast', 'Normal', 'Fully overcast'),
+    ('Clouds', 'Overcast', 'Normal', 'Cloudy skies'),
     ('Rain', 'Precipitation', 'Moderate', 'Rainfall'),
     ('Heavy Rain', 'Precipitation', 'Severe', 'Heavy rainfall with flooding risk'),
     ('Thunderstorm', 'Storm', 'Severe', 'Thunder and lightning with rain'),
     ('Snow', 'Precipitation', 'Moderate', 'Snowfall'),
     ('Blizzard', 'Storm', 'Extreme', 'Heavy snow with strong winds'),
-    ('Fog', 'Visibility', 'Moderate', 'Reduced visibility'),
+    ('Fog', 'Visibility', 'Moderate', 'Reduced visibility due to fog'),
+    ('Mist', 'Visibility', 'Normal', 'Light mist'),
+    ('Haze', 'Visibility', 'Normal', 'Light haze'),
+    ('Smoke', 'Visibility', 'Moderate', 'Smoke reducing visibility'),
+    ('Dust', 'Visibility', 'Moderate', 'Dust in air'),
+    ('Sand', 'Visibility', 'Moderate', 'Sand storm'),
+    ('Drizzle', 'Precipitation', 'Normal', 'Light rain'),
     ('Windy', 'Wind', 'Moderate', 'Strong winds'),
+    ('Squall', 'Wind', 'Severe', 'Sudden strong wind'),
     ('Tornado', 'Storm', 'Extreme', 'Tornado conditions'),
     ('Hurricane', 'Storm', 'Extreme', 'Hurricane conditions'),
-    ('Haze', 'Visibility', 'Normal', 'Light haze'),
-    ('Drizzle', 'Precipitation', 'Normal', 'Light rain'),
     ('Unknown', 'Unknown', 'Normal', 'Condition not determined')
 ON CONFLICT (condition) DO NOTHING;
 
 -- ============================================================
--- POPULATE dim_time (generate 1 year of hourly timestamps)
+-- POPULATE dim_time (2 years of hourly timestamps)
 -- ============================================================
 INSERT INTO climate_warehouse.dim_time (
     full_timestamp, date, year, quarter, month, month_name,
