@@ -1,6 +1,6 @@
 """
-🌍 Climate Intelligence Command Center v2
-No login — straight to the dashboard.
+🌍 Climate Intelligence Command Center v3 (FIXED)
+Schema-aligned, dynamic city count, visibility_km support.
 
 Run: streamlit run genai/chatbot_app.py
 """
@@ -33,7 +33,6 @@ st.markdown("""
 @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
 @keyframes slideUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
 @keyframes glow { 0%,100% { box-shadow:0 0 8px #22d3ee33; } 50% { box-shadow:0 0 20px #22d3ee55; } }
-@keyframes gradientShift { 0% { background-position:0% 50%; } 50% { background-position:100% 50%; } 100% { background-position:0% 50%; } }
 
 /* === TOP BAR === */
 .top-bar {
@@ -169,7 +168,7 @@ div[data-testid="stStatusWidget"] { visibility:hidden; }
 
 
 # ============================================================
-# DATABASE HELPER
+# DATABASE HELPER — FIXED: aligned with create_wh.sql schema
 # ============================================================
 
 DB = dict(host="localhost", port=5432, database="airflow", user="airflow", password="airflow")
@@ -186,8 +185,8 @@ def get_db_stats():
         extreme = c.fetchone()[0]
         conn.close()
         return total, extreme
-    except:
-        return 660, 13
+    except Exception:
+        return 0, 0
 
 
 # ============================================================
@@ -200,17 +199,21 @@ def init_groq():
 
 @st.cache_resource
 def load_gold_data():
-    """Load gold parquet with pandas (fast) + build ChromaDB vector store."""
+    """Load gold parquet with pandas + build ChromaDB vector store."""
     try:
         df = pd.read_parquet("data/gold/weather_features")
 
         client = chromadb.Client()
         try: client.delete_collection("climate_data")
-        except: pass
+        except Exception: pass
         coll = client.create_collection("climate_data", metadata={"hnsw:space": "cosine"})
 
         docs, metas, ids = [], [], []
         for i, (_, r) in enumerate(df.iterrows()):
+            # FIXED: use visibility_km (aligned with warehouse schema)
+            vis_val = r.get('visibility_km', r.get('visibility_miles', 'N/A'))
+            vis_unit = "km" if 'visibility_km' in r.index else "miles"
+
             doc = (
                 f"City: {r.get('city','N/A')}, State: {r.get('state','N/A')}. "
                 f"Temperature: {r.get('temperature_fahrenheit','N/A')}°F ({r.get('temperature_celsius','N/A')}°C). "
@@ -221,14 +224,20 @@ def load_gold_data():
                 f"Wind Chill: {r.get('wind_chill','N/A')}°F. "
                 f"Weather Condition: {r.get('weather_condition','N/A')}. "
                 f"Cloud Cover: {r.get('cloud_cover_percent','N/A')}%. "
-                f"Visibility: {r.get('visibility_miles','N/A')} miles. "
+                f"Visibility: {vis_val} {vis_unit}. "
                 f"Extreme Weather: {'YES' if r.get('is_extreme_weather',0)==1 else 'No'}. "
+                f"Heatwave: {'YES' if r.get('is_heatwave',0)==1 else 'No'}. "
+                f"Extreme Cold: {'YES' if r.get('is_extreme_cold',0)==1 else 'No'}. "
+                f"High Wind: {'YES' if r.get('is_high_wind',0)==1 else 'No'}. "
                 f"Temperature Anomaly Score: {r.get('temp_anomaly_score','N/A')}. "
                 f"Temperature Anomaly: {r.get('temperature_anomaly','N/A')}°F."
             )
             docs.append(doc)
-            metas.append({"city": str(r.get('city', '')), "temp": float(r.get('temperature_fahrenheit', 0)),
-                          "extreme": int(r.get('is_extreme_weather', 0))})
+            metas.append({
+                "city": str(r.get('city', '')),
+                "temp": float(r.get('temperature_fahrenheit', 0)),
+                "extreme": int(r.get('is_extreme_weather', 0)),
+            })
             ids.append(f"rec_{i}")
 
         for s in range(0, len(docs), 100):
@@ -256,12 +265,10 @@ def detect_mode(q):
                  "weather in", "what's the weather", "tell me about", "update for", "status"]
     if any(k in q for k in report_kw): return "report"
 
-    # Simple "which city" questions → RAG (faster & more reliable)
     simple_rag = ["which city has", "what city has", "hottest", "coldest",
                   "warmest", "coolest", "most humid", "windiest"]
     if any(k in q for k in simple_rag): return "rag"
 
-    # SQL only for true aggregate / multi-row queries
     sql_kw = ["average", "avg", "count", "how many", "total", "sum",
               "list all", "show me all", "group by", "per city", "each city",
               "compare", "percentage", "rank", "top 5", "top 10", "top 3",
@@ -272,26 +279,34 @@ def detect_mode(q):
 
 
 def build_sql_answer(question, gc):
+    # FIXED: schema info aligned with create_wh.sql
     schema_info = """
     Tables:
     1. climate_warehouse.fact_weather_readings
        Columns: reading_key, location_key, time_key, weather_type_key,
        temperature_fahrenheit, temperature_celsius, humidity_percent, pressure_hpa,
-       wind_speed_mph, wind_direction_degrees, precipitation_mm, visibility_miles,
-       cloud_cover_percent, heat_index, wind_chill, temperature_anomaly,
-       temp_anomaly_score, is_extreme_weather, data_quality_score
+       wind_speed_mph, wind_direction_degrees, precipitation_mm, visibility_km,
+       cloud_cover_percent, uv_index, heat_index, wind_chill,
+       temp_anomaly, temp_anomaly_score,
+       is_extreme_weather, is_heatwave, is_extreme_cold, is_high_wind,
+       is_heavy_precipitation, source, quality_flag
 
     2. climate_warehouse.dim_location
-       Columns: location_key, city, state, latitude, longitude, region
+       Columns: location_key, city, state, country, latitude, longitude, region
 
     3. climate_warehouse.dim_time
-       Columns: time_key, reading_timestamp, hour, day_of_week, month, year, is_daytime
+       Columns: time_key, full_timestamp, date, year, quarter, month, month_name,
+       week_of_year, day_of_month, day_of_week, day_name, hour, is_weekend, season
 
     4. climate_warehouse.dim_weather_type
-       Columns: weather_type_key, weather_condition, weather_group
+       Columns: weather_type_key, condition, category, severity, description
 
-    RULES: Always JOIN fact with dim_location using location_key. Use ROUND(). Add LIMIT 20.
-    Return ONLY a valid PostgreSQL SELECT statement. No explanations, no markdown.
+    RULES:
+    - Always JOIN fact with dim_location using location_key.
+    - JOIN with dim_time using time_key for time-based queries.
+    - JOIN with dim_weather_type using weather_type_key for weather condition queries.
+    - Use ROUND() for decimals. Add LIMIT 20.
+    - Return ONLY a valid PostgreSQL SELECT statement. No explanations.
     """
     r = gc.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -299,15 +314,12 @@ def build_sql_answer(question, gc):
             {"role": "system", "content": f"You are a PostgreSQL expert. Output ONLY the SQL query, nothing else.\n{schema_info}"},
             {"role": "user", "content": f"Write a SELECT query for: {question}"}
         ],
-        max_tokens=300, temperature=0.05
+        max_tokens=400, temperature=0.05
     )
     raw = r.choices[0].message.content.strip()
 
-    # Robust SQL extraction — find the SELECT statement
-    sql = ""
-    # Remove markdown code fences
+    # Extract SQL
     raw = raw.replace("```sql", "").replace("```", "").strip()
-    # Find the SELECT statement
     lines = raw.split("\n")
     capture = False
     sql_lines = []
@@ -320,9 +332,8 @@ def build_sql_answer(question, gc):
             break
     sql = "\n".join(sql_lines).strip().rstrip(";").strip()
 
-    # If we still couldn't find a SELECT, bail out
     if not sql or not sql.upper().startswith("SELECT"):
-        return None, "sql"  # Signal to fallback to RAG
+        return None, "sql"
 
     try:
         conn = get_conn(); cur = conn.cursor(); cur.execute(sql)
@@ -341,8 +352,8 @@ def build_sql_answer(question, gc):
             max_tokens=250, temperature=0.2
         )
         return r2.choices[0].message.content.strip() + f"\n\n📝 `{sql}`", "sql"
-    except Exception as e:
-        return None, "sql"  # Signal to fallback to RAG
+    except Exception:
+        return None, "sql"
 
 
 def build_rag_answer(question, coll, gc, mode="rag"):
@@ -352,7 +363,7 @@ def build_rag_answer(question, coll, gc, mode="rag"):
 
     prompts = {
         "rag": (
-            "You are an expert climate analyst monitoring 20 US cities. "
+            "You are an expert climate analyst. "
             "Answer ONLY from the provided data. Be specific with numbers and city names. "
             "If data doesn't contain the answer, say so clearly."
         ),
@@ -387,11 +398,10 @@ def build_rag_answer(question, coll, gc, mode="rag"):
 
 
 def try_direct_answer(question, gold_df):
-    """Answer simple min/max/ranking questions directly from DataFrame — 100% accurate."""
+    """Answer simple min/max/ranking questions directly from DataFrame."""
     q = question.lower()
     cities = gold_df.drop_duplicates(subset=['city'], keep='last')
 
-    # --- Hottest / Highest Temperature ---
     if any(k in q for k in ["hottest", "highest temp", "warmest", "highest temperature", "most hot"]):
         row = cities.loc[cities['temperature_fahrenheit'].idxmax()]
         top5 = cities.nlargest(5, 'temperature_fahrenheit')[['city', 'state', 'temperature_fahrenheit']]
@@ -400,7 +410,6 @@ def try_direct_answer(question, gold_df):
         return (f"🔥 **{row['city']}, {row['state']}** has the highest temperature at **{round(row['temperature_fahrenheit'],1)}°F**.\n\n"
                 f"**Top 5 Hottest Cities:**\n{lines}"), "rag"
 
-    # --- Coldest / Lowest Temperature ---
     if any(k in q for k in ["coldest", "lowest temp", "coolest", "lowest temperature", "most cold", "freezing"]):
         row = cities.loc[cities['temperature_fahrenheit'].idxmin()]
         bot5 = cities.nsmallest(5, 'temperature_fahrenheit')[['city', 'state', 'temperature_fahrenheit']]
@@ -409,19 +418,16 @@ def try_direct_answer(question, gold_df):
         return (f"🥶 **{row['city']}, {row['state']}** has the lowest temperature at **{round(row['temperature_fahrenheit'],1)}°F**.\n\n"
                 f"**Top 5 Coldest Cities:**\n{lines}"), "rag"
 
-    # --- Most Humid ---
     if any(k in q for k in ["most humid", "highest humidity", "humid"]):
         row = cities.loc[cities['humidity_percent'].idxmax()]
         return (f"💧 **{row['city']}, {row['state']}** has the highest humidity at **{round(row['humidity_percent'],1)}%** "
                 f"with a temperature of {round(row['temperature_fahrenheit'],1)}°F."), "rag"
 
-    # --- Windiest ---
     if any(k in q for k in ["windiest", "most windy", "highest wind", "strongest wind"]):
         row = cities.loc[cities['wind_speed_mph'].idxmax()]
         return (f"💨 **{row['city']}, {row['state']}** has the highest wind speed at **{round(row['wind_speed_mph'],1)} mph** "
                 f"with a temperature of {round(row['temperature_fahrenheit'],1)}°F."), "rag"
 
-    # --- Extreme Weather ---
     if any(k in q for k in ["extreme weather", "extreme events", "how many extreme"]):
         ext = cities[cities['is_extreme_weather'] == 1]
         count = len(ext)
@@ -431,16 +437,22 @@ def try_direct_answer(question, gold_df):
         return (f"⚠️ **{count} extreme weather event(s)** detected:\n\n{city_list}\n\n"
                 f"These cities have conditions outside normal ranges based on anomaly scoring."), "rag"
 
-    return None, None  # Not a direct-answer question
+    # FIXED: heatwave-specific query
+    if any(k in q for k in ["heatwave", "heat wave"]):
+        hw = cities[cities.get('is_heatwave', pd.Series([0]*len(cities))) == 1]
+        if len(hw) == 0:
+            return "✅ No heatwave conditions detected.", "rag"
+        city_list = ", ".join([f"**{r['city']}** ({round(r['temperature_fahrenheit'],1)}°F)" for _, r in hw.iterrows()])
+        return f"🔥 **{len(hw)} city/cities** with heatwave conditions (>100°F):\n\n{city_list}", "rag"
+
+    return None, None
 
 
 def ai_answer(question, coll, gc):
-    # Step 1: Try direct DataFrame answer (instant, 100% accurate)
     direct, mode = try_direct_answer(question, st.session_state.gold_df)
     if direct:
         return direct, mode
 
-    # Step 2: Route to appropriate AI mode
     mode = detect_mode(question)
     if mode == "sql":
         result, m = build_sql_answer(question, gc)
@@ -451,7 +463,7 @@ def ai_answer(question, coll, gc):
 
 
 # ============================================================
-# MAIN APP — Direct, no auth
+# MAIN APP
 # ============================================================
 
 def render_app():
@@ -464,7 +476,6 @@ def render_app():
         st.error("❌ Could not load data. Run the pipeline first:\n`python data_processing/spark_batch_gold.py`")
         st.stop()
 
-    # Store in session state for direct answers
     st.session_state.gold_df = gold_df
 
     cities = gold_df.drop_duplicates(subset=['city'], keep='last').sort_values('temperature_fahrenheit', ascending=False)
@@ -473,13 +484,14 @@ def render_app():
     max_t = round(gold_df['temperature_fahrenheit'].max(), 1)
     min_t = round(gold_df['temperature_fahrenheit'].min(), 1)
     now = datetime.now().strftime("%b %d, %Y • %I:%M %p")
+    city_count = len(cities)  # FIXED: dynamic count
 
     # ── TOP BAR ──
     st.markdown(f"""
     <div class="top-bar">
         <span class="top-title">🌍 Climate Command Center</span>
         <span class="top-status">
-            <span class="live-dot"></span> LIVE &nbsp;│&nbsp; {len(cities)} CITIES &nbsp;│&nbsp;
+            <span class="live-dot"></span> LIVE &nbsp;│&nbsp; {city_count} CITIES &nbsp;│&nbsp;
             <span class="status-chip">🕐 {now}</span>
         </span>
     </div>
@@ -532,12 +544,13 @@ def render_app():
     # ── AI CHAT ──
     st.markdown('<div class="section-hdr">🧠 &nbsp;AI Weather Intelligence</div>', unsafe_allow_html=True)
 
+    # FIXED: dynamic city count in welcome message
     if "msgs" not in st.session_state:
         st.session_state.msgs = [{
             "role": "bot",
             "text": (
-                "Welcome to Climate Command Center! 👋 I'm monitoring **"
-                f"{len(cities)} US cities** in real-time.\n\n"
+                f"Welcome to Climate Command Center! 👋 I'm monitoring **"
+                f"{city_count} cities** in real-time.\n\n"
                 "I support 4 intelligence modes:\n"
                 "• **RAG** — Ask anything about current weather data\n"
                 "• **SQL** — Quantitative queries (averages, counts, rankings)\n"
@@ -562,7 +575,6 @@ def render_app():
     with c5:
         if st.button("🔍 Anomalies", use_container_width=True): qk = "Detect and explain any weather anomalies across all cities"
 
-    # Tags
     tag_html = {
         "rag":     '<span class="tag tag-rag">RAG</span>',
         "sql":     '<span class="tag tag-sql">SQL</span>',
@@ -570,7 +582,6 @@ def render_app():
         "anomaly": '<span class="tag tag-anomaly">ANOMALY</span>',
     }
 
-    # Render chat
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
     for msg in st.session_state.msgs:
         if msg["role"] == "user":
@@ -581,7 +592,6 @@ def render_app():
             st.markdown(f'<div class="chat-msg-bot">{tag}<br>{text}</div><div class="chat-clear"></div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Input
     user_in = st.chat_input("Ask about weather, climate, extreme events, or city conditions...")
     if qk:
         user_in = qk
@@ -594,6 +604,6 @@ def render_app():
 
 
 # ============================================================
-# RUN — Direct, no login
+# RUN
 # ============================================================
 render_app()
