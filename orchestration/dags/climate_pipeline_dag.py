@@ -1,20 +1,20 @@
 """
-Climate Intelligence Platform - Main Pipeline DAG (v3 FIXED)
+Climate Intelligence Platform - Main Pipeline DAG (v4 FINAL)
 =============================================================
-Orchestrates the entire data pipeline:
-1. Verify Bronze data exists
-2. Bronze → Silver (cleaning)
-3. Silver → Gold (feature engineering)
-4. Gold → Warehouse (load star schema)
-5. Data quality checks
+Fully aligned with:
+  - kafka_producer_openweather.py (80 global cities)
+  - create_wh.sql (star schema)
+  - chatbot_app.py (Streamlit UI)
 
-FIXES in v3:
-- time_key now populated by matching timestamps to dim_time
-- dim_weather_type column names aligned (condition, not weather_condition)
-- Extreme sub-flags populated (is_heatwave, is_extreme_cold, etc.)
-- visibility converted from miles to km
-- source and quality_flag populated
-- Batch inserts for performance
+Changes from v2:
+  1. dim_location uses (city, country) unique key + populates continent, region from data
+  2. time_key populated by rounding timestamp → matching dim_time
+  3. weather_condition → dim_weather_type.condition mapping
+  4. visibility_miles → visibility_km conversion
+  5. Extreme sub-flags: is_heatwave, is_extreme_cold, is_high_wind, is_heavy_precipitation
+  6. source + quality_flag populated
+  7. Batch inserts with execute_values
+  8. Gold layer adds visibility_km + sub-flags
 
 Schedule: Daily at 6:00 AM UTC
 """
@@ -53,11 +53,11 @@ DB_CONFIG = dict(host="postgres", port=5432, database="airflow", user="airflow",
 
 
 # ============================================================
-# TASK 1: VERIFY DATA EXISTS
+# TASK 1: VERIFY BRONZE DATA EXISTS
 # ============================================================
 
 def verify_bronze_data(**context):
-    """Check that Bronze layer has data before processing."""
+    """Check that Bronze layer has parquet data."""
     import os
 
     log.info(f"Checking Bronze path: {BRONZE_PATH}")
@@ -78,7 +78,7 @@ def verify_bronze_data(**context):
                 parquet_files.append(os.path.join(root, f))
 
     if len(parquet_files) == 0:
-        raise FileNotFoundError(f"No parquet files found in {BRONZE_PATH}.")
+        raise FileNotFoundError(f"No parquet files in {BRONZE_PATH}.")
 
     log.info(f"Found {len(parquet_files)} parquet files in Bronze layer")
     return len(parquet_files)
@@ -114,7 +114,7 @@ def run_bronze_to_silver(**context):
 
         silver_df = bronze_df
 
-        # 1. Deduplicate
+        # 1. Deduplicate by city + timestamp
         if "city" in silver_df.columns and "timestamp" in silver_df.columns:
             silver_df = silver_df.dropDuplicates(["city", "timestamp"])
         elif "city" in silver_df.columns and "reading_timestamp" in silver_df.columns:
@@ -171,7 +171,7 @@ def run_bronze_to_silver(**context):
 # ============================================================
 
 def run_silver_to_gold(**context):
-    """Silver → Gold: Feature engineering."""
+    """Silver → Gold: Feature engineering + derived columns."""
     from pyspark.sql import SparkSession
     from pyspark.sql import functions as F
     from pyspark.sql.window import Window
@@ -193,14 +193,14 @@ def run_silver_to_gold(**context):
 
         gold_df = silver_df
 
-        # 1. Temperature Celsius
+        # 1. Temperature Celsius (if not already from producer)
         if "temperature_celsius" not in gold_df.columns and "temperature_fahrenheit" in gold_df.columns:
             gold_df = gold_df.withColumn(
                 "temperature_celsius",
                 F.round((F.col("temperature_fahrenheit") - 32) * 5 / 9, 2)
             )
 
-        # 2. Heat Index (Rothfusz)
+        # 2. Heat Index (Rothfusz formula)
         if "temperature_fahrenheit" in gold_df.columns and "humidity_percent" in gold_df.columns:
             gold_df = gold_df.withColumn(
                 "heat_index",
@@ -228,7 +228,7 @@ def run_silver_to_gold(**context):
                 ).otherwise(F.col("temperature_fahrenheit"))
             )
 
-        # 4. City-level statistics
+        # 4. City-level statistics (anomaly detection)
         if "city" in gold_df.columns and "temperature_fahrenheit" in gold_df.columns:
             city_window = Window.partitionBy("city")
             gold_df = gold_df.withColumn("city_avg_temp", F.round(F.avg("temperature_fahrenheit").over(city_window), 2))
@@ -247,7 +247,11 @@ def run_silver_to_gold(**context):
             )
 
         # 5. Time features
-        ts_col = "timestamp" if "timestamp" in gold_df.columns else "reading_timestamp" if "reading_timestamp" in gold_df.columns else None
+        ts_col = None
+        for candidate in ["timestamp", "reading_timestamp"]:
+            if candidate in gold_df.columns:
+                ts_col = candidate
+                break
         if ts_col:
             gold_df = gold_df.withColumn("hour_of_day", F.hour(F.col(ts_col)))
             gold_df = gold_df.withColumn("day_of_week", F.dayofweek(F.col(ts_col)))
@@ -255,7 +259,16 @@ def run_silver_to_gold(**context):
             gold_df = gold_df.withColumn("is_daytime",
                 F.when((F.hour(F.col(ts_col)) >= 6) & (F.hour(F.col(ts_col)) < 20), 1).otherwise(0))
 
-        # 6. Extreme weather flags (main + sub-flags)
+        # 6. Visibility in km (producer sends visibility_miles)
+        if "visibility_miles" in gold_df.columns and "visibility_km" not in gold_df.columns:
+            gold_df = gold_df.withColumn(
+                "visibility_km",
+                F.round(F.col("visibility_miles") * 1.60934, 2)
+            )
+        elif "visibility_km" not in gold_df.columns:
+            gold_df = gold_df.withColumn("visibility_km", F.lit(None).cast("double"))
+
+        # 7. Extreme weather flags (main + sub-flags)
         gold_df = gold_df.withColumn(
             "is_extreme_weather",
             F.when(
@@ -266,8 +279,6 @@ def run_silver_to_gold(**context):
                 F.lit(1)
             ).otherwise(F.lit(0))
         )
-
-        # NEW: Sub-flags for the warehouse
         gold_df = gold_df.withColumn(
             "is_heatwave",
             F.when(F.col("temperature_fahrenheit") > 100, 1).otherwise(0)
@@ -287,15 +298,6 @@ def run_silver_to_gold(**context):
             )
         else:
             gold_df = gold_df.withColumn("is_heavy_precipitation", F.lit(0))
-
-        # 7. Visibility in km (convert from miles if needed)
-        if "visibility_miles" in gold_df.columns and "visibility_km" not in gold_df.columns:
-            gold_df = gold_df.withColumn(
-                "visibility_km",
-                F.round(F.col("visibility_miles") * 1.60934, 2)
-            )
-        elif "visibility_km" not in gold_df.columns:
-            gold_df = gold_df.withColumn("visibility_km", F.lit(None).cast("double"))
 
         # Fill nulls in numeric columns
         numeric_cols = [f.name for f in gold_df.schema.fields
@@ -319,19 +321,30 @@ def run_silver_to_gold(**context):
 
 
 # ============================================================
-# TASK 4: GOLD → WAREHOUSE (FIXED)
+# TASK 4: GOLD → WAREHOUSE (Fully Aligned)
 # ============================================================
 
 def run_warehouse_load(**context):
     """Load Gold Parquet into PostgreSQL Star Schema.
 
-    FIXES:
-    - time_key populated by rounding timestamp to nearest hour and matching dim_time
-    - weather_condition mapped to dim_weather_type.condition
-    - Extreme sub-flags (is_heatwave, is_extreme_cold, etc.) populated
-    - visibility_km used (converted from miles if needed)
-    - source and quality_flag populated
-    - Batch inserts with execute_values for performance
+    Aligned with:
+      - kafka_producer_openweather.py field names
+      - create_wh.sql table definitions
+      - chatbot_app.py query expectations
+
+    Key mappings:
+      Producer field        → Warehouse column
+      ─────────────────────────────────────────
+      city                  → dim_location.city
+      country               → dim_location.country
+      continent             → dim_location.continent
+      region                → dim_location.region (from data, NOT hardcoded)
+      state                 → dim_location.state (nullable)
+      weather_condition     → dim_weather_type.condition
+      visibility_miles      → fact.visibility_km (converted)
+      temperature_anomaly   → fact.temp_anomaly
+      temp_anomaly_score    → fact.temp_anomaly_score
+      timestamp (rounded)   → fact.time_key (lookup in dim_time)
     """
     import psycopg2
     from psycopg2.extras import execute_values
@@ -350,24 +363,23 @@ def run_warehouse_load(**context):
     cursor.execute("CREATE SCHEMA IF NOT EXISTS climate_warehouse")
     conn.commit()
 
-    # ── Run create_wh.sql tables if they don't exist ──
-    # dim_location
+    # ── Create tables if they don't exist ──
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS climate_warehouse.dim_location (
             location_key SERIAL PRIMARY KEY,
             city VARCHAR(100) NOT NULL,
-            state VARCHAR(50),
             country VARCHAR(50) DEFAULT 'US',
+            continent VARCHAR(50),
+            state VARCHAR(50),
             latitude DOUBLE PRECISION,
             longitude DOUBLE PRECISION,
             region VARCHAR(50),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(city, state)
+            UNIQUE(city, country)
         )
     """)
 
-    # dim_time (keep existing if already populated)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS climate_warehouse.dim_time (
             time_key SERIAL PRIMARY KEY,
@@ -388,7 +400,6 @@ def run_warehouse_load(**context):
         )
     """)
 
-    # dim_weather_type
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS climate_warehouse.dim_weather_type (
             weather_type_key SERIAL PRIMARY KEY,
@@ -400,7 +411,6 @@ def run_warehouse_load(**context):
         )
     """)
 
-    # fact table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS climate_warehouse.fact_weather_readings (
             reading_key SERIAL PRIMARY KEY,
@@ -433,34 +443,30 @@ def run_warehouse_load(**context):
     """)
 
     # Indexes
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fact_location ON climate_warehouse.fact_weather_readings(location_key)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fact_time ON climate_warehouse.fact_weather_readings(time_key)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fact_weather_type ON climate_warehouse.fact_weather_readings(weather_type_key)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_fact_extreme ON climate_warehouse.fact_weather_readings(is_extreme_weather)")
+    for idx_sql in [
+        "CREATE INDEX IF NOT EXISTS idx_fact_location ON climate_warehouse.fact_weather_readings(location_key)",
+        "CREATE INDEX IF NOT EXISTS idx_fact_time ON climate_warehouse.fact_weather_readings(time_key)",
+        "CREATE INDEX IF NOT EXISTS idx_fact_weather_type ON climate_warehouse.fact_weather_readings(weather_type_key)",
+        "CREATE INDEX IF NOT EXISTS idx_fact_extreme ON climate_warehouse.fact_weather_readings(is_extreme_weather)",
+    ]:
+        cursor.execute(idx_sql)
     conn.commit()
 
     # ── Populate dim_time if empty ──
     cursor.execute("SELECT COUNT(*) FROM climate_warehouse.dim_time")
-    time_count = cursor.fetchone()[0]
-    if time_count == 0:
-        log.info("Populating dim_time with hourly timestamps...")
+    if cursor.fetchone()[0] == 0:
+        log.info("Populating dim_time with hourly timestamps (2025-2026)...")
         cursor.execute("""
             INSERT INTO climate_warehouse.dim_time (
                 full_timestamp, date, year, quarter, month, month_name,
                 week_of_year, day_of_month, day_of_week, day_name,
                 hour, is_weekend, season
             )
-            SELECT
-                ts,
-                ts::date,
-                EXTRACT(YEAR FROM ts)::int,
-                EXTRACT(QUARTER FROM ts)::int,
-                EXTRACT(MONTH FROM ts)::int,
-                TO_CHAR(ts, 'Month'),
-                EXTRACT(WEEK FROM ts)::int,
-                EXTRACT(DAY FROM ts)::int,
-                EXTRACT(DOW FROM ts)::int,
-                TO_CHAR(ts, 'Day'),
+            SELECT ts, ts::date,
+                EXTRACT(YEAR FROM ts)::int, EXTRACT(QUARTER FROM ts)::int,
+                EXTRACT(MONTH FROM ts)::int, TO_CHAR(ts, 'Month'),
+                EXTRACT(WEEK FROM ts)::int, EXTRACT(DAY FROM ts)::int,
+                EXTRACT(DOW FROM ts)::int, TO_CHAR(ts, 'Day'),
                 EXTRACT(HOUR FROM ts)::int,
                 EXTRACT(DOW FROM ts) IN (0, 6),
                 CASE
@@ -479,88 +485,91 @@ def run_warehouse_load(**context):
         conn.commit()
         log.info("dim_time populated")
 
-    # ── Populate dim_weather_type with known conditions ──
+    # ── Populate dim_weather_type ──
+    # Known OpenWeatherMap "main" values + extras
     known_conditions = [
         ('Clear', 'Fair', 'Normal', 'Clear skies'),
-        ('Partly Cloudy', 'Fair', 'Normal', 'Partially cloudy skies'),
-        ('Cloudy', 'Overcast', 'Normal', 'Fully overcast'),
         ('Clouds', 'Overcast', 'Normal', 'Cloudy skies'),
         ('Rain', 'Precipitation', 'Moderate', 'Rainfall'),
-        ('Heavy Rain', 'Precipitation', 'Severe', 'Heavy rainfall'),
+        ('Drizzle', 'Precipitation', 'Normal', 'Light rain'),
         ('Thunderstorm', 'Storm', 'Severe', 'Thunder and lightning'),
         ('Snow', 'Precipitation', 'Moderate', 'Snowfall'),
-        ('Blizzard', 'Storm', 'Extreme', 'Heavy snow with winds'),
-        ('Fog', 'Visibility', 'Moderate', 'Reduced visibility'),
         ('Mist', 'Visibility', 'Normal', 'Light mist'),
+        ('Fog', 'Visibility', 'Moderate', 'Reduced visibility'),
         ('Haze', 'Visibility', 'Normal', 'Light haze'),
-        ('Drizzle', 'Precipitation', 'Normal', 'Light rain'),
-        ('Windy', 'Wind', 'Moderate', 'Strong winds'),
+        ('Smoke', 'Visibility', 'Moderate', 'Smoke'),
+        ('Dust', 'Visibility', 'Moderate', 'Dust in air'),
+        ('Sand', 'Visibility', 'Moderate', 'Sand storm'),
+        ('Squall', 'Wind', 'Severe', 'Sudden strong wind'),
         ('Tornado', 'Storm', 'Extreme', 'Tornado conditions'),
-        ('Hurricane', 'Storm', 'Extreme', 'Hurricane conditions'),
         ('Unknown', 'Unknown', 'Normal', 'Condition not determined'),
     ]
     for cond, cat, sev, desc in known_conditions:
         cursor.execute("""
             INSERT INTO climate_warehouse.dim_weather_type (condition, category, severity, description)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (condition) DO NOTHING
+            VALUES (%s, %s, %s, %s) ON CONFLICT (condition) DO NOTHING
         """, (cond, cat, sev, desc))
 
-    # Also insert any conditions from the gold data that aren't in the known list
+    # Also insert any conditions from Gold data not in the known list
     if "weather_condition" in gold_df.columns:
-        gold_conditions = gold_df["weather_condition"].dropna().unique()
         category_map = {
             "Clear": "Fair", "Clouds": "Overcast", "Rain": "Precipitation",
             "Drizzle": "Precipitation", "Snow": "Precipitation", "Mist": "Visibility",
             "Fog": "Visibility", "Haze": "Visibility", "Thunderstorm": "Storm",
+            "Smoke": "Visibility", "Dust": "Visibility", "Sand": "Visibility",
+            "Squall": "Wind", "Tornado": "Storm",
         }
-        for cond in gold_conditions:
+        for cond in gold_df["weather_condition"].dropna().unique():
             cond_str = str(cond).strip()
             if not cond_str:
                 continue
             cat = category_map.get(cond_str, "Other")
             cursor.execute("""
                 INSERT INTO climate_warehouse.dim_weather_type (condition, category, severity, description)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (condition) DO NOTHING
+                VALUES (%s, %s, %s, %s) ON CONFLICT (condition) DO NOTHING
             """, (cond_str, cat, "Normal", f"{cond_str} conditions"))
-
     conn.commit()
 
-    # ── Load dim_location ──
-    region_map = {
-        "New York": "Northeast", "Boston": "Northeast", "Philadelphia": "Northeast",
-        "Miami": "Southeast", "Atlanta": "Southeast", "New Orleans": "Southeast",
-        "Houston": "South", "Dallas": "South", "Nashville": "South",
-        "Chicago": "Midwest", "Detroit": "Midwest", "Minneapolis": "Midwest",
-        "Denver": "West", "Phoenix": "West", "Las Vegas": "West",
-        "Los Angeles": "West", "San Francisco": "West", "Seattle": "Northwest",
-        "Portland": "Northwest", "Honolulu": "Pacific", "Anchorage": "Alaska",
-    }
-
+    # ── Load dim_location from Gold data (NOT hardcoded) ──
     if "city" in gold_df.columns:
-        cities = gold_df.drop_duplicates(subset=["city"])[
-            [c for c in ["city", "state", "latitude", "longitude"] if c in gold_df.columns]
-        ].copy()
+        loc_cols = [c for c in ["city", "country", "continent", "state", "latitude", "longitude", "region"]
+                    if c in gold_df.columns]
+        cities = gold_df.drop_duplicates(subset=["city"])[loc_cols].copy()
+
         for _, row in cities.iterrows():
             city = row.get("city", "")
-            region = region_map.get(city, "Other")
+            country = row.get("country", "US")
+            continent = row.get("continent", None)
+            state = row.get("state", None)
+            lat = row.get("latitude", None)
+            lon = row.get("longitude", None)
+            region = row.get("region", None)  # USE DATA, not hardcoded map
+
             cursor.execute("""
-                INSERT INTO climate_warehouse.dim_location (city, state, latitude, longitude, region)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (city, state) DO NOTHING
-            """, (city, row.get("state"), row.get("latitude"), row.get("longitude"), region))
+                INSERT INTO climate_warehouse.dim_location
+                    (city, country, continent, state, latitude, longitude, region)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (city, country) DO UPDATE SET
+                    continent = EXCLUDED.continent,
+                    state = EXCLUDED.state,
+                    latitude = EXCLUDED.latitude,
+                    longitude = EXCLUDED.longitude,
+                    region = EXCLUDED.region,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (city, country, continent, state, lat, lon, region))
 
     conn.commit()
 
     # ── Build lookup maps ──
-    cursor.execute("SELECT location_key, city FROM climate_warehouse.dim_location")
-    loc_map = {row[1]: row[0] for row in cursor.fetchall()}
+    cursor.execute("SELECT location_key, city, country FROM climate_warehouse.dim_location")
+    loc_map = {}
+    for row in cursor.fetchall():
+        loc_map[(row[1], row[2])] = row[0]  # (city, country) → location_key
+        loc_map[row[1]] = row[0]              # city → location_key (fallback)
 
     cursor.execute("SELECT weather_type_key, condition FROM climate_warehouse.dim_weather_type")
     wt_map = {row[1]: row[0] for row in cursor.fetchall()}
 
-    # Build time_key lookup: full_timestamp → time_key
     cursor.execute("SELECT time_key, full_timestamp FROM climate_warehouse.dim_time")
     time_map = {row[1]: row[0] for row in cursor.fetchall()}
 
@@ -575,14 +584,8 @@ def run_warehouse_load(**context):
     cursor.execute("TRUNCATE climate_warehouse.fact_weather_readings RESTART IDENTITY")
     conn.commit()
 
-    # ── Batch insert facts ──
-    loaded = 0
-    skipped = 0
-    batch = []
-    batch_size = 100
-
+    # ── Helper functions ──
     def safe_float(val):
-        """Convert value to float, return None if not possible."""
         if val is None or (isinstance(val, float) and np.isnan(val)):
             return None
         try:
@@ -591,7 +594,6 @@ def run_warehouse_load(**context):
             return None
 
     def safe_int(val):
-        """Convert value to int, return None if not possible."""
         if val is None or (isinstance(val, float) and np.isnan(val)):
             return None
         try:
@@ -599,33 +601,39 @@ def run_warehouse_load(**context):
         except (ValueError, TypeError):
             return None
 
+    # ── Batch insert facts ──
+    loaded = 0
+    skipped = 0
+    batch = []
+    batch_size = 200
+
     for _, row in gold_df.iterrows():
         city = row.get("city", "")
-        loc_key = loc_map.get(city)
+        country = row.get("country", "US")
+
+        # Look up location_key: try (city, country) first, then city-only fallback
+        loc_key = loc_map.get((city, country)) or loc_map.get(city)
         if not loc_key:
             skipped += 1
             continue
 
-        # ── FIXED: Look up time_key by rounding to nearest hour ──
+        # ── time_key: round timestamp to nearest hour → match dim_time ──
         time_key = None
         if ts_col and pd.notna(row.get(ts_col)):
             try:
                 ts = pd.Timestamp(row[ts_col])
-                # Round to nearest hour (dim_time has hourly granularity)
                 rounded = ts.floor("h").to_pydatetime().replace(tzinfo=None)
                 time_key = time_map.get(rounded)
             except Exception:
                 time_key = None
 
-        # ── FIXED: Map weather_condition → dim_weather_type.condition ──
+        # ── weather_type_key: weather_condition → condition ──
         wt_key = None
         weather_cond = str(row.get("weather_condition", "")).strip()
         if weather_cond:
-            wt_key = wt_map.get(weather_cond)
-            if not wt_key:
-                wt_key = wt_map.get("Unknown")
+            wt_key = wt_map.get(weather_cond, wt_map.get("Unknown"))
 
-        # ── FIXED: Convert visibility (miles → km) ──
+        # ── visibility: convert miles → km if needed ──
         vis_km = safe_float(row.get("visibility_km"))
         if vis_km is None or vis_km == 0:
             vis_miles = safe_float(row.get("visibility_miles"))
@@ -645,7 +653,7 @@ def run_warehouse_load(**context):
             safe_float(row.get("precipitation_mm")),
             vis_km,
             safe_int(row.get("cloud_cover_percent")),
-            safe_float(row.get("uv_index")),
+            None,  # uv_index — producer doesn't send this
             safe_float(row.get("heat_index")),
             safe_float(row.get("wind_chill")),
             safe_float(row.get("temperature_anomaly")),
@@ -660,7 +668,6 @@ def run_warehouse_load(**context):
         ))
         loaded += 1
 
-        # Flush batch
         if len(batch) >= batch_size:
             execute_values(cursor, """
                 INSERT INTO climate_warehouse.fact_weather_readings
@@ -677,7 +684,6 @@ def run_warehouse_load(**context):
             """, batch)
             batch = []
 
-    # Flush remaining
     if batch:
         execute_values(cursor, """
             INSERT INTO climate_warehouse.fact_weather_readings
@@ -695,7 +701,7 @@ def run_warehouse_load(**context):
 
     conn.commit()
     conn.close()
-    log.info(f"Warehouse loaded: {loaded} fact records, {skipped} skipped")
+    log.info(f"Warehouse loaded: {loaded} records, {skipped} skipped")
 
 
 # ============================================================
@@ -722,6 +728,10 @@ def run_data_quality_check(**context):
             "sql": "SELECT COUNT(DISTINCT city) FROM climate_warehouse.dim_location",
             "min_expected": 1,
         },
+        "Unique countries": {
+            "sql": "SELECT COUNT(DISTINCT country) FROM climate_warehouse.dim_location",
+            "min_expected": 1,
+        },
         "Extreme weather count": {
             "sql": "SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE is_extreme_weather = 1",
             "min_expected": 0,
@@ -734,13 +744,17 @@ def run_data_quality_check(**context):
             "sql": "SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE temperature_fahrenheit < -80 OR temperature_fahrenheit > 140",
             "max_expected": 0,
         },
-        "Null time_key count": {
+        "Null time_key (should be low)": {
             "sql": "SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE time_key IS NULL",
-            "max_expected": 50,  # Allow some nulls if timestamps don't match exactly
+            "max_expected": 50,
         },
-        "Null location_key count": {
+        "Null location_key": {
             "sql": "SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE location_key IS NULL",
             "max_expected": 0,
+        },
+        "Records with source tag": {
+            "sql": "SELECT COUNT(*) FROM climate_warehouse.fact_weather_readings WHERE source = 'openweathermap'",
+            "min_expected": 1,
         },
     }
 
@@ -748,23 +762,20 @@ def run_data_quality_check(**context):
     for name, check in checks.items():
         cursor.execute(check["sql"])
         result = cursor.fetchone()[0]
-
         passed = True
         if "min_expected" in check and result < check["min_expected"]:
             passed = False
         if "max_expected" in check and result > check["max_expected"]:
             passed = False
-
         status = "PASS" if passed else "FAIL"
         log.info(f"  [{status}] {name}: {result}")
-
         if not passed:
             all_passed = False
 
     conn.close()
 
     if not all_passed:
-        raise Exception("Data quality checks failed! Check logs above.")
+        raise Exception("Data quality checks failed!")
 
     log.info("All data quality checks passed!")
 
@@ -776,19 +787,13 @@ def run_data_quality_check(**context):
 with DAG(
     dag_id="climate_intelligence_pipeline",
     default_args=default_args,
-    description="End-to-end climate data pipeline: Ingest → Process → Warehouse → Quality Check",
+    description="End-to-end: Bronze → Silver → Gold → Warehouse → Quality Check",
     schedule_interval="0 6 * * *",
     catchup=False,
     tags=["climate", "pipeline", "production"],
     doc_md="""
-    ## Climate Intelligence Pipeline
-
+    ## Climate Intelligence Pipeline (80 Global Cities)
     **Flow:** Bronze → Silver → Gold → PostgreSQL Warehouse → Quality Check
-
-    **Prerequisites:**
-    - Kafka producer running
-    - Spark streaming writing Bronze
-    - Docker volumes mounted correctly
     """,
 ) as dag:
 
@@ -796,25 +801,21 @@ with DAG(
         task_id="verify_bronze_data",
         python_callable=verify_bronze_data,
     )
-
     task_silver = PythonOperator(
         task_id="bronze_to_silver",
         python_callable=run_bronze_to_silver,
         execution_timeout=timedelta(minutes=15),
     )
-
     task_gold = PythonOperator(
         task_id="silver_to_gold",
         python_callable=run_silver_to_gold,
         execution_timeout=timedelta(minutes=15),
     )
-
     task_warehouse = PythonOperator(
         task_id="load_warehouse",
         python_callable=run_warehouse_load,
         execution_timeout=timedelta(minutes=10),
     )
-
     task_quality = PythonOperator(
         task_id="data_quality_check",
         python_callable=run_data_quality_check,
