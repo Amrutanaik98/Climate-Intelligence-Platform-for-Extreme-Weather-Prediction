@@ -1,20 +1,15 @@
 """
-Climate Intelligence Platform - Main Pipeline DAG (v4 FINAL)
+Climate Intelligence Platform - Main Pipeline DAG (v5 + GCS)
 =============================================================
 Fully aligned with:
   - kafka_producer_openweather.py (80 global cities)
   - create_wh.sql (star schema)
   - chatbot_app.py (Streamlit UI)
 
-Changes from v2:
-  1. dim_location uses (city, country) unique key + populates continent, region from data
-  2. time_key populated by rounding timestamp → matching dim_time
-  3. weather_condition → dim_weather_type.condition mapping
-  4. visibility_miles → visibility_km conversion
-  5. Extreme sub-flags: is_heatwave, is_extreme_cold, is_high_wind, is_heavy_precipitation
-  6. source + quality_flag populated
-  7. Batch inserts with execute_values
-  8. Gold layer adds visibility_km + sub-flags
+NEW in v5:
+  - Automatic GCS upload after Silver and Gold stages
+  - Bronze upload option (from Spark streaming output)
+  - GCS bucket structure mirrors local: bronze/, silver/, gold/
 
 Schedule: Daily at 6:00 AM UTC
 """
@@ -41,7 +36,7 @@ default_args = {
 }
 
 # ============================================================
-# PATHS
+# PATHS — Local
 # ============================================================
 PROJECT_ROOT = "/opt/airflow"
 DATA_DIR = f"{PROJECT_ROOT}/data"
@@ -49,7 +44,63 @@ BRONZE_PATH = f"{DATA_DIR}/bronze/weather_readings"
 SILVER_PATH = f"{DATA_DIR}/silver/weather_readings"
 GOLD_PATH = f"{DATA_DIR}/gold/weather_features"
 
+# ============================================================
+# GCS CONFIG — 3 separate buckets (one per layer)
+# ============================================================
+import os
+GCS_BUCKET_BRONZE = os.getenv("GCS_BUCKET_BRONZE", "climate-intelligence-485704-climate-bronze")
+GCS_BUCKET_SILVER = os.getenv("GCS_BUCKET_SILVER", "climate-intelligence-485704-climate-silver")
+GCS_BUCKET_GOLD   = os.getenv("GCS_BUCKET_GOLD",   "climate-intelligence-485704-climate-gold")
+GCS_BRONZE_PREFIX = "weather_readings"
+GCS_SILVER_PREFIX = "weather_readings"
+GCS_GOLD_PREFIX   = "weather_features"
+
+# Database config
 DB_CONFIG = dict(host="postgres", port=5432, database="airflow", user="airflow", password="airflow")
+
+
+# ============================================================
+# GCS UPLOAD HELPER
+# ============================================================
+
+def upload_folder_to_gcs(local_path, bucket_name, gcs_prefix=""):
+    """Upload an entire local folder (parquet files) to a GCS bucket.
+
+    Structure on GCS:
+      gs://climate-intelligence-485704-climate-bronze/weather_readings/reading_date=2026-03-15/part-00000.parquet
+      gs://climate-intelligence-485704-climate-silver/weather_readings/reading_date=2026-03-15/part-00000.parquet
+      gs://climate-intelligence-485704-climate-gold/weather_features/reading_date=2026-03-15/part-00000.parquet
+    """
+    from google.cloud import storage
+
+    client = storage.Client()
+    bucket = client.bucket(bucket_name)
+
+    uploaded = 0
+    skipped = 0
+
+    for root, dirs, files in os.walk(local_path):
+        for filename in files:
+            local_file = os.path.join(root, filename)
+            relative_path = os.path.relpath(local_file, local_path)
+            gcs_path = f"{gcs_prefix}/{relative_path}".replace("\\", "/") if gcs_prefix else relative_path.replace("\\", "/")
+
+            blob = bucket.blob(gcs_path)
+
+            # Only upload if file is newer than GCS version
+            if blob.exists():
+                blob.reload()
+                local_mtime = datetime.fromtimestamp(os.path.getmtime(local_file))
+                gcs_mtime = blob.updated.replace(tzinfo=None)
+                if local_mtime <= gcs_mtime:
+                    skipped += 1
+                    continue
+
+            blob.upload_from_filename(local_file)
+            uploaded += 1
+
+    log.info(f"GCS upload to gs://{bucket_name}/{gcs_prefix}: {uploaded} uploaded, {skipped} unchanged")
+    return uploaded
 
 
 # ============================================================
@@ -58,8 +109,6 @@ DB_CONFIG = dict(host="postgres", port=5432, database="airflow", user="airflow",
 
 def verify_bronze_data(**context):
     """Check that Bronze layer has parquet data."""
-    import os
-
     log.info(f"Checking Bronze path: {BRONZE_PATH}")
 
     if not os.path.exists(BRONZE_PATH):
@@ -167,6 +216,18 @@ def run_bronze_to_silver(**context):
 
 
 # ============================================================
+# TASK 2B: UPLOAD BRONZE + SILVER TO GCS
+# ============================================================
+
+def upload_bronze_silver_to_gcs(**context):
+    """Upload Bronze and Silver parquet to their separate GCS buckets."""
+    log.info("Uploading Bronze + Silver to GCS...")
+    bronze_count = upload_folder_to_gcs(BRONZE_PATH, GCS_BUCKET_BRONZE, GCS_BRONZE_PREFIX)
+    silver_count = upload_folder_to_gcs(SILVER_PATH, GCS_BUCKET_SILVER, GCS_SILVER_PREFIX)
+    log.info(f"GCS upload complete: Bronze={bronze_count}, Silver={silver_count}")
+
+
+# ============================================================
 # TASK 3: SILVER → GOLD (Feature Engineering)
 # ============================================================
 
@@ -193,7 +254,7 @@ def run_silver_to_gold(**context):
 
         gold_df = silver_df
 
-        # 1. Temperature Celsius (if not already from producer)
+        # 1. Temperature Celsius
         if "temperature_celsius" not in gold_df.columns and "temperature_fahrenheit" in gold_df.columns:
             gold_df = gold_df.withColumn(
                 "temperature_celsius",
@@ -259,7 +320,7 @@ def run_silver_to_gold(**context):
             gold_df = gold_df.withColumn("is_daytime",
                 F.when((F.hour(F.col(ts_col)) >= 6) & (F.hour(F.col(ts_col)) < 20), 1).otherwise(0))
 
-        # 6. Visibility in km (producer sends visibility_miles)
+        # 6. Visibility in km
         if "visibility_miles" in gold_df.columns and "visibility_km" not in gold_df.columns:
             gold_df = gold_df.withColumn(
                 "visibility_km",
@@ -268,7 +329,7 @@ def run_silver_to_gold(**context):
         elif "visibility_km" not in gold_df.columns:
             gold_df = gold_df.withColumn("visibility_km", F.lit(None).cast("double"))
 
-        # 7. Extreme weather flags (main + sub-flags)
+        # 7. Extreme weather flags
         gold_df = gold_df.withColumn(
             "is_extreme_weather",
             F.when(
@@ -279,23 +340,15 @@ def run_silver_to_gold(**context):
                 F.lit(1)
             ).otherwise(F.lit(0))
         )
-        gold_df = gold_df.withColumn(
-            "is_heatwave",
-            F.when(F.col("temperature_fahrenheit") > 100, 1).otherwise(0)
-        )
-        gold_df = gold_df.withColumn(
-            "is_extreme_cold",
-            F.when(F.col("temperature_fahrenheit") < 10, 1).otherwise(0)
-        )
-        gold_df = gold_df.withColumn(
-            "is_high_wind",
-            F.when(F.col("wind_speed_mph") > 50, 1).otherwise(0)
-        )
+        gold_df = gold_df.withColumn("is_heatwave",
+            F.when(F.col("temperature_fahrenheit") > 100, 1).otherwise(0))
+        gold_df = gold_df.withColumn("is_extreme_cold",
+            F.when(F.col("temperature_fahrenheit") < 10, 1).otherwise(0))
+        gold_df = gold_df.withColumn("is_high_wind",
+            F.when(F.col("wind_speed_mph") > 50, 1).otherwise(0))
         if "precipitation_mm" in gold_df.columns:
-            gold_df = gold_df.withColumn(
-                "is_heavy_precipitation",
-                F.when(F.col("precipitation_mm") > 10, 1).otherwise(0)
-            )
+            gold_df = gold_df.withColumn("is_heavy_precipitation",
+                F.when(F.col("precipitation_mm") > 10, 1).otherwise(0))
         else:
             gold_df = gold_df.withColumn("is_heavy_precipitation", F.lit(0))
 
@@ -321,31 +374,22 @@ def run_silver_to_gold(**context):
 
 
 # ============================================================
-# TASK 4: GOLD → WAREHOUSE (Fully Aligned)
+# TASK 3B: UPLOAD GOLD TO GCS
+# ============================================================
+
+def upload_gold_to_gcs(**context):
+    """Upload Gold parquet to its GCS bucket."""
+    log.info("Uploading Gold to GCS...")
+    gold_count = upload_folder_to_gcs(GOLD_PATH, GCS_BUCKET_GOLD, GCS_GOLD_PREFIX)
+    log.info(f"GCS Gold upload complete: {gold_count} files")
+
+
+# ============================================================
+# TASK 4: GOLD → WAREHOUSE
 # ============================================================
 
 def run_warehouse_load(**context):
-    """Load Gold Parquet into PostgreSQL Star Schema.
-
-    Aligned with:
-      - kafka_producer_openweather.py field names
-      - create_wh.sql table definitions
-      - chatbot_app.py query expectations
-
-    Key mappings:
-      Producer field        → Warehouse column
-      ─────────────────────────────────────────
-      city                  → dim_location.city
-      country               → dim_location.country
-      continent             → dim_location.continent
-      region                → dim_location.region (from data, NOT hardcoded)
-      state                 → dim_location.state (nullable)
-      weather_condition     → dim_weather_type.condition
-      visibility_miles      → fact.visibility_km (converted)
-      temperature_anomaly   → fact.temp_anomaly
-      temp_anomaly_score    → fact.temp_anomaly_score
-      timestamp (rounded)   → fact.time_key (lookup in dim_time)
-    """
+    """Load Gold Parquet into PostgreSQL Star Schema."""
     import psycopg2
     from psycopg2.extras import execute_values
     import pandas as pd
@@ -442,7 +486,6 @@ def run_warehouse_load(**context):
         )
     """)
 
-    # Indexes
     for idx_sql in [
         "CREATE INDEX IF NOT EXISTS idx_fact_location ON climate_warehouse.fact_weather_readings(location_key)",
         "CREATE INDEX IF NOT EXISTS idx_fact_time ON climate_warehouse.fact_weather_readings(time_key)",
@@ -455,7 +498,7 @@ def run_warehouse_load(**context):
     # ── Populate dim_time if empty ──
     cursor.execute("SELECT COUNT(*) FROM climate_warehouse.dim_time")
     if cursor.fetchone()[0] == 0:
-        log.info("Populating dim_time with hourly timestamps (2025-2026)...")
+        log.info("Populating dim_time...")
         cursor.execute("""
             INSERT INTO climate_warehouse.dim_time (
                 full_timestamp, date, year, quarter, month, month_name,
@@ -486,7 +529,6 @@ def run_warehouse_load(**context):
         log.info("dim_time populated")
 
     # ── Populate dim_weather_type ──
-    # Known OpenWeatherMap "main" values + extras
     known_conditions = [
         ('Clear', 'Fair', 'Normal', 'Clear skies'),
         ('Clouds', 'Overcast', 'Normal', 'Cloudy skies'),
@@ -510,7 +552,6 @@ def run_warehouse_load(**context):
             VALUES (%s, %s, %s, %s) ON CONFLICT (condition) DO NOTHING
         """, (cond, cat, sev, desc))
 
-    # Also insert any conditions from Gold data not in the known list
     if "weather_condition" in gold_df.columns:
         category_map = {
             "Clear": "Fair", "Clouds": "Overcast", "Rain": "Precipitation",
@@ -530,21 +571,13 @@ def run_warehouse_load(**context):
             """, (cond_str, cat, "Normal", f"{cond_str} conditions"))
     conn.commit()
 
-    # ── Load dim_location from Gold data (NOT hardcoded) ──
+    # ── Load dim_location from data ──
     if "city" in gold_df.columns:
         loc_cols = [c for c in ["city", "country", "continent", "state", "latitude", "longitude", "region"]
                     if c in gold_df.columns]
         cities = gold_df.drop_duplicates(subset=["city"])[loc_cols].copy()
 
         for _, row in cities.iterrows():
-            city = row.get("city", "")
-            country = row.get("country", "US")
-            continent = row.get("continent", None)
-            state = row.get("state", None)
-            lat = row.get("latitude", None)
-            lon = row.get("longitude", None)
-            region = row.get("region", None)  # USE DATA, not hardcoded map
-
             cursor.execute("""
                 INSERT INTO climate_warehouse.dim_location
                     (city, country, continent, state, latitude, longitude, region)
@@ -556,7 +589,8 @@ def run_warehouse_load(**context):
                     longitude = EXCLUDED.longitude,
                     region = EXCLUDED.region,
                     updated_at = CURRENT_TIMESTAMP
-            """, (city, country, continent, state, lat, lon, region))
+            """, (row.get("city",""), row.get("country","US"), row.get("continent"),
+                  row.get("state"), row.get("latitude"), row.get("longitude"), row.get("region")))
 
     conn.commit()
 
@@ -564,8 +598,8 @@ def run_warehouse_load(**context):
     cursor.execute("SELECT location_key, city, country FROM climate_warehouse.dim_location")
     loc_map = {}
     for row in cursor.fetchall():
-        loc_map[(row[1], row[2])] = row[0]  # (city, country) → location_key
-        loc_map[row[1]] = row[0]              # city → location_key (fallback)
+        loc_map[(row[1], row[2])] = row[0]
+        loc_map[row[1]] = row[0]
 
     cursor.execute("SELECT weather_type_key, condition FROM climate_warehouse.dim_weather_type")
     wt_map = {row[1]: row[0] for row in cursor.fetchall()}
@@ -573,18 +607,16 @@ def run_warehouse_load(**context):
     cursor.execute("SELECT time_key, full_timestamp FROM climate_warehouse.dim_time")
     time_map = {row[1]: row[0] for row in cursor.fetchall()}
 
-    # ── Determine timestamp column ──
     ts_col = None
     for candidate in ["timestamp", "reading_timestamp"]:
         if candidate in gold_df.columns:
             ts_col = candidate
             break
 
-    # ── Clear and reload fact table ──
+    # ── Clear and reload ──
     cursor.execute("TRUNCATE climate_warehouse.fact_weather_readings RESTART IDENTITY")
     conn.commit()
 
-    # ── Helper functions ──
     def safe_float(val):
         if val is None or (isinstance(val, float) and np.isnan(val)):
             return None
@@ -601,7 +633,6 @@ def run_warehouse_load(**context):
         except (ValueError, TypeError):
             return None
 
-    # ── Batch insert facts ──
     loaded = 0
     skipped = 0
     batch = []
@@ -610,14 +641,11 @@ def run_warehouse_load(**context):
     for _, row in gold_df.iterrows():
         city = row.get("city", "")
         country = row.get("country", "US")
-
-        # Look up location_key: try (city, country) first, then city-only fallback
         loc_key = loc_map.get((city, country)) or loc_map.get(city)
         if not loc_key:
             skipped += 1
             continue
 
-        # ── time_key: round timestamp to nearest hour → match dim_time ──
         time_key = None
         if ts_col and pd.notna(row.get(ts_col)):
             try:
@@ -627,13 +655,11 @@ def run_warehouse_load(**context):
             except Exception:
                 time_key = None
 
-        # ── weather_type_key: weather_condition → condition ──
         wt_key = None
         weather_cond = str(row.get("weather_condition", "")).strip()
         if weather_cond:
             wt_key = wt_map.get(weather_cond, wt_map.get("Unknown"))
 
-        # ── visibility: convert miles → km if needed ──
         vis_km = safe_float(row.get("visibility_km"))
         if vis_km is None or vis_km == 0:
             vis_miles = safe_float(row.get("visibility_miles"))
@@ -641,9 +667,7 @@ def run_warehouse_load(**context):
                 vis_km = round(vis_miles * 1.60934, 2)
 
         batch.append((
-            loc_key,
-            time_key,
-            wt_key,
+            loc_key, time_key, wt_key,
             safe_float(row.get("temperature_fahrenheit")),
             safe_float(row.get("temperature_celsius")),
             safe_float(row.get("humidity_percent")),
@@ -653,7 +677,7 @@ def run_warehouse_load(**context):
             safe_float(row.get("precipitation_mm")),
             vis_km,
             safe_int(row.get("cloud_cover_percent")),
-            None,  # uv_index — producer doesn't send this
+            None,  # uv_index
             safe_float(row.get("heat_index")),
             safe_float(row.get("wind_chill")),
             safe_float(row.get("temperature_anomaly")),
@@ -781,19 +805,26 @@ def run_data_quality_check(**context):
 
 
 # ============================================================
-# DAG DEFINITION
+# DAG DEFINITION — Now with GCS upload tasks
 # ============================================================
 
 with DAG(
     dag_id="climate_intelligence_pipeline",
     default_args=default_args,
-    description="End-to-end: Bronze → Silver → Gold → Warehouse → Quality Check",
+    description="End-to-end: Bronze → Silver → GCS → Gold → GCS → Warehouse → Quality Check",
     schedule_interval="0 6 * * *",
     catchup=False,
-    tags=["climate", "pipeline", "production"],
+    tags=["climate", "pipeline", "production", "gcs"],
     doc_md="""
-    ## Climate Intelligence Pipeline (80 Global Cities)
-    **Flow:** Bronze → Silver → Gold → PostgreSQL Warehouse → Quality Check
+    ## Climate Intelligence Pipeline (80 Global Cities + GCS)
+
+    **Flow:**
+    Bronze → Silver → GCS(bronze+silver) → Gold → GCS(gold) → Warehouse → Quality Check
+
+    **GCS Buckets:**
+    - gs://climate-intelligence-485704-climate-bronze
+    - gs://climate-intelligence-485704-climate-silver
+    - gs://climate-intelligence-485704-climate-gold
     """,
 ) as dag:
 
@@ -806,10 +837,20 @@ with DAG(
         python_callable=run_bronze_to_silver,
         execution_timeout=timedelta(minutes=15),
     )
+    task_gcs_bronze_silver = PythonOperator(
+        task_id="upload_bronze_silver_to_gcs",
+        python_callable=upload_bronze_silver_to_gcs,
+        execution_timeout=timedelta(minutes=10),
+    )
     task_gold = PythonOperator(
         task_id="silver_to_gold",
         python_callable=run_silver_to_gold,
         execution_timeout=timedelta(minutes=15),
+    )
+    task_gcs_gold = PythonOperator(
+        task_id="upload_gold_to_gcs",
+        python_callable=upload_gold_to_gcs,
+        execution_timeout=timedelta(minutes=10),
     )
     task_warehouse = PythonOperator(
         task_id="load_warehouse",
@@ -821,4 +862,5 @@ with DAG(
         python_callable=run_data_quality_check,
     )
 
-    task_verify >> task_silver >> task_gold >> task_warehouse >> task_quality
+    # Pipeline flow with GCS uploads
+    task_verify >> task_silver >> task_gcs_bronze_silver >> task_gold >> task_gcs_gold >> task_warehouse >> task_quality
