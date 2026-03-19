@@ -770,8 +770,7 @@ OPENWEATHER_API_KEY=your_key_here
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092
 SCHEMA_REGISTRY_URL=http://localhost:8081
 
-# Gen AI
-GROQ_API_KEY=your_groq_key_here
+
 
 # MLflow
 MLFLOW_TRACKING_URI=file:./mlruns
@@ -790,10 +789,4 @@ GCP_REGION=us-central1
 
 ---
 
-## 📄 License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-*Built with ❤️ for global climate resilience*
