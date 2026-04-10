@@ -53,3 +53,4 @@ terraform.tfvars
 gcp-key.json.terraform/
 *.tfstate
 *.tfstate.backup
+gcp-key.json
